@@ -1,0 +1,43 @@
+# Environment and secrets
+.env
+.token_cache.json
+
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+venv/
+env/
+ENV/
+.venv/
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# Logs
+*.log
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Distribution
+dist/
+build/
+*.egg-info/
+
+# Excel API docs (local reference only)
+*.xlsx
+
+# Claude settings
+.claude/
+
+# Test
+.pytest_cache/
+.coverage
+htmlcov/
