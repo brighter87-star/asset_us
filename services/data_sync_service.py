@@ -80,17 +80,30 @@ def sync_holdings_from_kis(
         print("  No holdings found")
         return 0
 
-    # 기존 데이터 삭제
+    # 기존 데이터 삭제 (먼저 commit)
     with conn.cursor() as cur:
         cur.execute("DELETE FROM holdings WHERE snapshot_date = %s", (snapshot_date,))
+    conn.commit()
 
-    # 새 데이터 삽입
+    # 새 데이터 삽입 (ON DUPLICATE KEY UPDATE 사용)
     insert_sql = """
         INSERT INTO holdings (
             snapshot_date, stk_cd, stk_nm, rmnd_qty, avg_prc, cur_prc,
             loan_dt, crd_class, currency, exchange_code,
             evlt_amt, pl_amt, pl_rt, pur_amt
         ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+        ON DUPLICATE KEY UPDATE
+            stk_nm = VALUES(stk_nm),
+            rmnd_qty = VALUES(rmnd_qty),
+            avg_prc = VALUES(avg_prc),
+            cur_prc = VALUES(cur_prc),
+            crd_class = VALUES(crd_class),
+            currency = VALUES(currency),
+            exchange_code = VALUES(exchange_code),
+            evlt_amt = VALUES(evlt_amt),
+            pl_amt = VALUES(pl_amt),
+            pl_rt = VALUES(pl_rt),
+            pur_amt = VALUES(pur_amt)
     """
 
     count = 0

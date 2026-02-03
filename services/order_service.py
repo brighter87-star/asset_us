@@ -18,9 +18,9 @@ POSITIONS_FILE = Path(__file__).resolve().parent.parent / ".positions.json"
 
 class DefaultSettings:
     """Default trading settings."""
-    UNIT: int = 1
-    TICK_BUFFER: int = 3
+    UNIT: float = 1.0
     STOP_LOSS_PCT: float = 7.0
+    PRICE_BUFFER_PCT: float = 0.5  # 주문가 버퍼 %
     UNIT_BASE_PERCENT: float = 5.0  # 1 unit = 5%
 
     def get_unit_percent(self) -> float:
@@ -35,11 +35,44 @@ class OrderService:
     Manages order execution and position tracking.
     """
 
+    # Price API -> Order API exchange code mapping
+    EXCHANGE_MAP = {
+        "NAS": "NASD",
+        "NYS": "NYSE",
+        "AMS": "AMEX",
+    }
+
     def __init__(self, settings: Any = None):
         self.settings = settings or DefaultSettings()
         self.client = KISAPIClient()
         self.positions: Dict[str, dict] = {}
+        self._exchange_cache: Dict[str, str] = {}  # symbol -> order exchange code
         self._load_positions()
+
+    def _detect_exchange(self, symbol: str) -> str:
+        """Detect the correct exchange for a symbol."""
+        # Check cache first
+        if symbol in self._exchange_cache:
+            cached = self._exchange_cache[symbol]
+            print(f"[{symbol}] Using cached exchange: {cached}")
+            return cached
+
+        # Try to get price from each exchange to detect correct one
+        exchanges_to_try = ["NAS", "NYS", "AMS"]
+        for price_exchange in exchanges_to_try:
+            try:
+                result = self.client.get_current_price(symbol, price_exchange)
+                if result and result.get("last", 0) > 0:
+                    order_exchange = self.EXCHANGE_MAP.get(price_exchange, "NASD")
+                    self._exchange_cache[symbol] = order_exchange
+                    print(f"[{symbol}] Detected exchange: {price_exchange} -> {order_exchange}")
+                    return order_exchange
+            except Exception:
+                continue
+
+        # Default to NASD if detection fails
+        print(f"[{symbol}] Exchange detection failed, defaulting to NASD")
+        return "NASD"
 
     def _load_positions(self):
         """Load positions from file."""
@@ -176,24 +209,27 @@ class OrderService:
             price: Stock price
 
         Returns:
-            Number of shares (rounded down)
+            Number of shares (at least 1, rounded to nearest)
         """
         half_unit_amount = self.calculate_half_unit_amount()
-        shares = int(half_unit_amount / price)
-        return max(shares, 0)
+        shares = round(half_unit_amount / price)  # 반올림
+        return max(shares, 1)  # 최소 1주
 
-    def get_tick_size(self, price: float) -> float:
+    def add_price_buffer(self, price: float, buffer_pct: float = None) -> float:
         """
-        Get tick size for US stocks.
-        US stocks trade in $0.01 increments.
-        """
-        return 0.01
+        Add percentage buffer to price for US stocks.
 
-    def add_tick_buffer(self, price: float) -> float:
-        """Add tick buffer to price."""
-        tick_size = self.get_tick_size(price)
-        buffer = tick_size * self.settings.TICK_BUFFER
-        return round(price + buffer, 2)
+        Args:
+            price: Current price
+            buffer_pct: Buffer percentage (uses settings.PRICE_BUFFER_PCT if None)
+
+        Returns:
+            Price with buffer added, rounded to 2 decimals
+        """
+        if buffer_pct is None:
+            buffer_pct = getattr(self.settings, 'PRICE_BUFFER_PCT', 0.5)
+        buffered_price = price * (1 + buffer_pct / 100)
+        return round(buffered_price, 2)
 
     def execute_buy(
         self,
@@ -215,7 +251,7 @@ class OrderService:
             Order result or None if failed
         """
         # Calculate buy price with tick buffer
-        buy_price = self.add_tick_buffer(target_price)
+        buy_price = self.add_price_buffer(target_price)  # +0.5%
 
         # Calculate shares (half unit each time)
         shares = self.calculate_shares(buy_price)
@@ -228,7 +264,9 @@ class OrderService:
         trade_logger.log_order_attempt(symbol, "BUY", shares, buy_price, "LIMIT", reason)
 
         try:
-            result = self.client.buy_order(symbol, shares, buy_price)
+            # Detect correct exchange for this symbol
+            exchange_code = self._detect_exchange(symbol)
+            result = self.client.buy_order(symbol, shares, buy_price, exchange_code=exchange_code)
 
             trade_logger.log_order_result(
                 symbol, "BUY", shares, buy_price,
@@ -301,7 +339,9 @@ class OrderService:
         trade_logger.log_order_attempt(symbol, "SELL", quantity, price, "LIMIT", reason)
 
         try:
-            result = self.client.sell_order(symbol, quantity, price)
+            # Detect correct exchange for this symbol
+            exchange_code = self._detect_exchange(symbol)
+            result = self.client.sell_order(symbol, quantity, price, exchange_code=exchange_code)
 
             # Calculate P&L
             entry_price = pos.get("entry_price", price)

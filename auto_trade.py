@@ -63,13 +63,13 @@ def print_settings(monitor: MonitorService = None):
         s = monitor.trading_settings
         unit_pct = s.get_unit_percent()
     else:
-        s = type('S', (), {'UNIT': 1, 'TICK_BUFFER': 3, 'STOP_LOSS_PCT': 7.0})()
+        s = type('S', (), {'UNIT': 1.0, 'STOP_LOSS_PCT': 7.0, 'PRICE_BUFFER_PCT': 0.5})()
         unit_pct = 5.0
 
     print("\n[Settings]")
     print(f"  UNIT: {s.UNIT} ({unit_pct}% of assets)")
-    print(f"  TICK_BUFFER: {s.TICK_BUFFER} ticks")
     print(f"  STOP_LOSS_PCT: {s.STOP_LOSS_PCT}%")
+    print(f"  PRICE_BUFFER_PCT: {getattr(s, 'PRICE_BUFFER_PCT', 0.5)}%")
 
 
 def test_connection():
@@ -193,7 +193,7 @@ def show_live_status(monitor: MonitorService, prices: dict, holdings_prices: dic
 
     # Watchlist section
     print("[Watchlist]")
-    print(f"{'Symbol':<8} {'Target':>12} {'Current':>12} {'P&L':>12} {'Status':>10}")
+    print(f"{'Symbol':<8} {'Target':>12} {'Current':>12} {'Diff':>12} {'Status':>10}")
     print("-" * 60)
 
     for item in monitor.watchlist:
@@ -241,7 +241,52 @@ def show_live_status(monitor: MonitorService, prices: dict, holdings_prices: dic
         else:
             print(f"{ticker:<8} ${target:>10,.2f} {'---':>12} {'---':>12} {'LOADING':>10}")
 
-    print("=" * 60)
+    print("-" * 60)
+
+    # Bot Trades Today section (only shows stocks traded by the bot, not manual trades)
+    bot_triggers = monitor.daily_triggers
+    if bot_triggers:
+        print("\n[Bot Trades Today] (auto-executed only, excludes manual trades)")
+        print(f"{'Symbol':<8} {'Target':>10} {'Entry':>10} {'Current':>10} {'Return':>10} {'Status':>12}")
+        print("-" * 70)
+
+        stop_loss_pct = monitor.trading_settings.STOP_LOSS_PCT
+
+        for symbol, trigger_info in bot_triggers.items():
+            entry_price = trigger_info.get('entry_price', 0)
+            entry_type = trigger_info.get('entry_type', 'breakout')
+
+            # Get target from watchlist
+            watchlist_item = next((w for w in monitor.watchlist if w['ticker'] == symbol), None)
+            target = watchlist_item['target_price'] if watchlist_item else entry_price
+
+            # Get current price
+            price_data = prices.get(symbol, {})
+            current = price_data.get('last', 0)
+            if current <= 0:
+                current = holdings_prices.get(symbol, {}).get('last', 0)
+
+            if current > 0 and entry_price > 0:
+                return_pct = ((current - entry_price) / entry_price) * 100
+                return_str = f"{return_pct:+.2f}%"
+
+                # Determine status
+                if return_pct <= -stop_loss_pct:
+                    status = "STOP LOSS"
+                elif return_pct < 0:
+                    status = "HOLDING -"
+                else:
+                    status = "HOLDING +"
+
+                print(f"{symbol:<8} ${target:>8,.2f} ${entry_price:>8,.2f} ${current:>8,.2f} {return_str:>10} {status:>12}")
+            else:
+                print(f"{symbol:<8} ${target:>8,.2f} ${entry_price:>8,.2f} {'---':>10} {'---':>10} {'LOADING':>12}")
+
+        print("-" * 70)
+    else:
+        print("\n[Bot Trades Today] No auto-executed trades yet")
+
+    print("=" * 85)
 
 
 def run_trading_loop():
@@ -329,8 +374,9 @@ def run_trading_loop():
                 monitor.load_watchlist()
                 last_date = today
 
-            # Get current prices
+            # Get current prices and update monitor's cache
             prices = poller.get_prices()
+            monitor.update_price_cache(prices)
 
             # Show live status periodically
             if current_time - last_status_time >= STATUS_INTERVAL:
@@ -347,6 +393,9 @@ def run_trading_loop():
                 if result.get("reloaded"):
                     print(f"[{now.strftime('%H:%M:%S')}] RELOADED: watchlist & settings")
                     print_settings(monitor)
+                    # Subscribe new symbols to poller
+                    new_tickers = [item['ticker'] for item in monitor.watchlist]
+                    poller.subscribe(new_tickers)
 
                 if result["entries"]:
                     for entry in result["entries"]:

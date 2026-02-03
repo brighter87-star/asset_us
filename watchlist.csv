@@ -1,4 +1,11 @@
 ticker,target_price,stop_loss_pct
-AAPL,200.00,
-NVDA,120.00,
-TSLA,300.00,5.0
+FIX,1214,
+EME,750,
+DE,541,
+TSLA,500,
+MYRG,265,
+MRK,115,
+MCD,323,
+MDT,106,
+WULF,17.2,
+PLTR,208,

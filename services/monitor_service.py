@@ -2,9 +2,10 @@
 Monitor service for price monitoring and trading strategy execution.
 """
 
+import json
 import os
 import pandas as pd
-from datetime import datetime, time
+from datetime import datetime, date, time
 from pathlib import Path
 from typing import Dict, List, Optional
 from zoneinfo import ZoneInfo
@@ -18,6 +19,7 @@ WATCHLIST_DIR = Path(__file__).resolve().parent.parent
 WATCHLIST_CSV = WATCHLIST_DIR / "watchlist.csv"
 WATCHLIST_XLSX = WATCHLIST_DIR / "watchlist.xlsx"
 SETTINGS_CSV = WATCHLIST_DIR / "settings.csv"
+DAILY_TRIGGERS_FILE = WATCHLIST_DIR / ".daily_triggers.json"
 
 # US Eastern timezone
 ET = ZoneInfo("America/New_York")
@@ -31,9 +33,9 @@ class TradingSettings:
     UNIT_BASE_PERCENT: float = 5.0
 
     def __init__(self):
-        self.UNIT: int = 1              # 총 몇 unit (1, 2, 3...)
-        self.TICK_BUFFER: int = 3       # 목표가 + N틱
+        self.UNIT: float = 1.0          # 총 몇 unit (0.5, 1, 2...)
         self.STOP_LOSS_PCT: float = 7.0 # 손절 %
+        self.PRICE_BUFFER_PCT: float = 0.5  # 주문가 버퍼 % (현재가 * 1.005)
 
     def update(self, key: str, value):
         """Update setting value."""
@@ -63,6 +65,44 @@ class MonitorService:
         self.daily_triggers: Dict[str, dict] = {}  # Track triggered entries today
         self._file_mtime: float = 0  # File modification time
         self._pre_market_reloaded: bool = False  # Track pre-market reload
+        self._price_cache: Dict[str, dict] = {}  # Cache from poller
+        self._load_daily_triggers()  # Load persisted bot trades
+
+    def _load_daily_triggers(self):
+        """Load daily triggers from file (only if same day)."""
+        try:
+            if DAILY_TRIGGERS_FILE.exists():
+                with open(DAILY_TRIGGERS_FILE, "r", encoding="utf-8") as f:
+                    data = json.load(f)
+
+                # Only load if same date
+                saved_date = data.get("date")
+                if saved_date == str(date.today()):
+                    self.daily_triggers = data.get("triggers", {})
+                    print(f"[TRIGGERS] Loaded {len(self.daily_triggers)} bot trades from today")
+                else:
+                    # Different day, start fresh
+                    self.daily_triggers = {}
+                    print(f"[TRIGGERS] New day, cleared previous triggers")
+        except Exception as e:
+            print(f"[WARN] Failed to load daily triggers: {e}")
+            self.daily_triggers = {}
+
+    def _save_daily_triggers(self):
+        """Save daily triggers to file."""
+        try:
+            data = {
+                "date": str(date.today()),
+                "triggers": self.daily_triggers,
+            }
+            with open(DAILY_TRIGGERS_FILE, "w", encoding="utf-8") as f:
+                json.dump(data, f, indent=2, default=str)
+        except Exception as e:
+            print(f"[WARN] Failed to save daily triggers: {e}")
+
+    def update_price_cache(self, prices: Dict[str, dict]):
+        """Update price cache from external source (e.g., poller)."""
+        self._price_cache = prices
 
     def _get_watchlist_file(self) -> Optional[Path]:
         """Get watchlist file path (CSV priority)."""
@@ -127,13 +167,13 @@ class MonitorService:
 
             print(f"[SETTINGS] UNIT={self.trading_settings.UNIT} "
                   f"({self.trading_settings.get_unit_percent()}%), "
-                  f"TICK={self.trading_settings.TICK_BUFFER}, "
-                  f"SL={self.trading_settings.STOP_LOSS_PCT}%")
+                  f"SL={self.trading_settings.STOP_LOSS_PCT}%, "
+                  f"BUFFER={self.trading_settings.PRICE_BUFFER_PCT}%")
 
             trade_logger.log_settings_change({
                 "UNIT": self.trading_settings.UNIT,
-                "TICK_BUFFER": self.trading_settings.TICK_BUFFER,
                 "STOP_LOSS_PCT": self.trading_settings.STOP_LOSS_PCT,
+                "PRICE_BUFFER_PCT": self.trading_settings.PRICE_BUFFER_PCT,
             })
             return True
 
@@ -287,12 +327,24 @@ class MonitorService:
         return True
 
     def get_price(self, symbol: str) -> Optional[dict]:
-        """Get current price for symbol."""
-        try:
-            return self.client.get_current_price(symbol, "NAS")
-        except Exception as e:
-            print(f"[{symbol}] Failed to get price: {e}")
-            return None
+        """Get current price for symbol (uses cache first, then API)."""
+        # Check cache first (from poller)
+        if symbol in self._price_cache:
+            cached = self._price_cache[symbol]
+            if cached and cached.get("last", 0) > 0:
+                return cached
+
+        # Fallback to API (try multiple exchanges)
+        exchanges = ["NAS", "NYS", "AMS"]
+        for exchange in exchanges:
+            try:
+                result = self.client.get_current_price(symbol, exchange)
+                if result and result.get("last", 0) > 0:
+                    return result
+            except Exception:
+                continue
+
+        return None
 
     def check_breakout_entry(self, item: dict) -> bool:
         """
@@ -321,11 +373,9 @@ class MonitorService:
 
         current_price = price_data["last"]
 
-        # Check breakout
-        trigger_price = target_price + (self.trading_settings.TICK_BUFFER * 0.01)
-
-        if current_price >= trigger_price:
-            print(f"[{symbol}] BREAKOUT: ${current_price:.2f} >= ${trigger_price:.2f}")
+        # Check breakout (current >= target)
+        if current_price >= target_price:
+            print(f"[{symbol}] BREAKOUT: ${current_price:.2f} >= ${target_price:.2f}")
             return True
 
         return False
@@ -354,10 +404,10 @@ class MonitorService:
             return False
 
         open_price = price_data["open"]
-        trigger_price = target_price + (self.trading_settings.TICK_BUFFER * 0.01)
 
-        if open_price >= trigger_price:
-            print(f"[{symbol}] GAP UP: Open ${open_price:.2f} >= ${trigger_price:.2f}")
+        # Gap up: open >= target
+        if open_price >= target_price:
+            print(f"[{symbol}] GAP UP: Open ${open_price:.2f} >= ${target_price:.2f}")
             return True
 
         return False
@@ -372,11 +422,9 @@ class MonitorService:
         if not price_data:
             return False
 
-        # Use current price for gap up, target price for breakout
-        if is_gap_up:
-            entry_price = price_data["last"]
-        else:
-            entry_price = target_price
+        # Always use current price for entry (ensures order fills)
+        # Target price is just the trigger, actual buy is at market price
+        entry_price = price_data["last"]
 
         result = self.order_service.execute_buy(
             symbol=symbol,
@@ -391,20 +439,33 @@ class MonitorService:
                 "entry_time": datetime.now().isoformat(),
                 "entry_price": entry_price,
             }
+            self._save_daily_triggers()  # Persist to file
             return True
 
         return False
 
     def check_and_execute_stop_loss(self) -> List[str]:
         """
-        Check stop loss for all open positions.
+        Check stop loss for TODAY's bought positions only (real-time).
+        Previous days' positions are checked at market close.
 
         Returns list of symbols that were stopped out.
         """
         stopped = []
 
+        # Only check today's bought stocks for real-time stop loss
+        today_bought = self._get_today_bought_symbols()
+        today_bought.update(self.daily_triggers.keys())
+
+        if not today_bought:
+            return stopped
+
         for pos in self.order_service.get_open_positions():
             symbol = pos["symbol"]
+
+            # Skip if not bought today
+            if symbol not in today_bought:
+                continue
 
             price_data = self.get_price(symbol)
             if not price_data:
@@ -416,37 +477,120 @@ class MonitorService:
                 result = self.order_service.execute_sell(
                     symbol=symbol,
                     price=current_price,
-                    reason="stop_loss",
+                    reason="stop_loss_intraday",
                 )
                 if result:
                     stopped.append(symbol)
 
         return stopped
 
+    def check_previous_holdings_stop_loss(self) -> List[str]:
+        """
+        Check stop loss for PREVIOUS days' holdings at market close.
+        Uses close price to determine if -7% threshold is breached.
+
+        Returns list of symbols that were stopped out.
+        """
+        stopped = []
+
+        today_bought = self._get_today_bought_symbols()
+        today_bought.update(self.daily_triggers.keys())
+
+        for pos in self.order_service.get_open_positions():
+            symbol = pos["symbol"]
+
+            # Skip if bought today (already handled by real-time stop loss)
+            if symbol in today_bought:
+                continue
+
+            price_data = self.get_price(symbol)
+            if not price_data:
+                continue
+
+            current_price = price_data["last"]
+
+            if self.order_service.check_stop_loss(symbol, current_price):
+                print(f"[{symbol}] Previous holding close below stop loss: ${current_price:.2f}")
+                result = self.order_service.execute_sell(
+                    symbol=symbol,
+                    price=current_price,
+                    reason="stop_loss_close",
+                )
+                if result:
+                    stopped.append(symbol)
+
+        return stopped
+
+    def _get_today_bought_symbols(self) -> set:
+        """Get symbols bought today from trade history (includes manual buys)."""
+        from db.connection import get_connection
+        from datetime import date
+
+        try:
+            conn = get_connection()
+            today = date.today()
+
+            with conn.cursor() as cur:
+                cur.execute("""
+                    SELECT DISTINCT stk_cd
+                    FROM account_trade_history
+                    WHERE trade_date = %s AND io_tp_nm LIKE '%%매수%%'
+                """, (today,))
+                rows = cur.fetchall()
+
+            conn.close()
+            return {row[0] for row in rows if row[0]}
+        except Exception as e:
+            print(f"[WARN] Failed to get today's buys: {e}")
+            return set()
+
+    def _sync_trade_history_before_close(self):
+        """Sync trade history from API before close logic (catch manual buys)."""
+        if hasattr(self, '_close_synced') and self._close_synced:
+            return  # Already synced today
+
+        try:
+            from db.connection import get_connection
+            from services.data_sync_service import sync_trade_history_from_kis
+
+            print("[CLOSE] Syncing trade history before close logic...")
+            conn = get_connection()
+            synced = sync_trade_history_from_kis(conn)
+            conn.close()
+            print(f"[CLOSE] Synced {synced} trades")
+            self._close_synced = True
+        except Exception as e:
+            print(f"[WARN] Failed to sync trade history: {e}")
+
     def execute_close_logic(self) -> Dict[str, str]:
         """
         Execute end-of-day logic for TODAY's entries only.
 
-        Logic (only for stocks entered today via daily_triggers):
+        Logic (stocks entered today - both auto and manual):
         - If close > entry: Add 0.5 unit (pyramid)
         - If close < entry: Sell all (cut loss)
 
-        Pre-existing positions (not in daily_triggers) are NOT affected.
+        Pre-existing positions (bought before today) are NOT affected.
 
         Returns dict of {symbol: action_taken}
         """
         actions = {}
 
-        # Only process stocks that were entered TODAY
-        if not self.daily_triggers:
-            print("[CLOSE] No daily triggers - skipping close logic")
+        # Get today's bought symbols (auto + manual)
+        today_bought = self._get_today_bought_symbols()
+        today_bought.update(self.daily_triggers.keys())
+
+        if not today_bought:
+            print("[CLOSE] No stocks bought today - skipping close logic")
             return actions
+
+        print(f"[CLOSE] Checking {len(today_bought)} stocks bought today: {today_bought}")
 
         for pos in self.order_service.get_open_positions():
             symbol = pos["symbol"]
 
-            # Skip if not entered today
-            if symbol not in self.daily_triggers:
+            # Skip if not bought today
+            if symbol not in today_bought:
                 continue
 
             entry_price = pos.get("entry_price", 0)
@@ -500,6 +644,7 @@ class MonitorService:
     def reset_daily_triggers(self):
         """Reset daily triggers (call at start of new trading day)."""
         self.daily_triggers = {}
+        self._save_daily_triggers()  # Persist reset
         print("[INFO] Daily triggers reset")
 
     def run_monitoring_cycle(self) -> dict:
@@ -553,6 +698,14 @@ class MonitorService:
 
         # Execute close logic near market close
         if self.is_near_market_close(5):
+            # Sync trade history first (to catch manual buys)
+            self._sync_trade_history_before_close()
+
+            # Check previous holdings stop loss (close price based)
+            prev_stopped = self.check_previous_holdings_stop_loss()
+            result["stop_losses"].extend(prev_stopped)
+
+            # Execute close logic for today's entries
             result["close_actions"] = self.execute_close_logic()
 
         return result

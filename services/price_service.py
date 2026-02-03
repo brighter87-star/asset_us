@@ -92,14 +92,29 @@ class RestPricePoller:
 
     def _poll_all_prices(self):
         """Poll prices for all subscribed stocks."""
+        # Try these exchanges in order
+        EXCHANGE_FALLBACK = ["NAS", "NYS", "AMS"]
+
         for symbol in self.subscribed_stocks:
             if not self.running:
                 break
 
-            try:
-                exchange_code = self.stock_exchanges.get(symbol, "NAS")
-                price_data = self.client.get_current_price(symbol, exchange_code)
+            # Determine which exchanges to try
+            preferred = self.stock_exchanges.get(symbol, "NAS")
+            exchanges_to_try = [preferred] + [e for e in EXCHANGE_FALLBACK if e != preferred]
 
+            price_data = None
+            for exchange_code in exchanges_to_try:
+                try:
+                    price_data = self.client.get_current_price(symbol, exchange_code)
+                    if price_data and price_data.get("last", 0) > 0:
+                        # Remember working exchange for next time
+                        self.stock_exchanges[symbol] = exchange_code
+                        break
+                except Exception:
+                    continue
+
+            if price_data and price_data.get("last", 0) > 0:
                 with self.prices_lock:
                     self.prices[symbol] = {
                         "last": price_data.get("last", 0),
@@ -116,12 +131,8 @@ class RestPricePoller:
                 if self.on_price_update:
                     self.on_price_update(symbol, self.prices[symbol])
 
-            except Exception as e:
-                # Silently ignore individual price errors
-                pass
-
             # Rate limit between API calls
-            time.sleep(0.5)
+            time.sleep(0.3)
 
     def get_price(self, symbol: str) -> Optional[dict]:
         """Get cached price for symbol."""

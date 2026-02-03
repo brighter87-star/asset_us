@@ -177,13 +177,13 @@ class TradeLogger:
         self._get_file_handler()
 
         if success:
-            msg = f"ORDER_SUCCESS | {side} {symbol} | qty={quantity} @ ${price:.2f} | order_no={order_no} | time={order_time}"
+            msg = f"ORDER_ACCEPTED | {side} {symbol} | qty={quantity} @ ${price:.2f} | order_no={order_no} | time={order_time}"
             self.logger.info(msg)
 
-            # Telegram notification
-            emoji = "\u2705" if side == "BUY" else "\U0001F4B0"
+            # Telegram notification - 주문 접수 (not 체결)
+            emoji = "\U0001F4DD"  # 메모 이모지
             tg_msg = (
-                f"{emoji} <b>주문체결</b>\n"
+                f"{emoji} <b>주문 접수</b>\n"
                 f"종목: <code>{symbol}</code>\n"
                 f"구분: {side}\n"
                 f"수량: {quantity}주\n"
@@ -218,6 +218,44 @@ class TradeLogger:
             "order_time": order_time,
             "message": message,
             "error": error,
+        })
+
+    def log_order_filled(
+        self,
+        symbol: str,
+        side: str,
+        quantity: int,
+        price: float,
+        order_no: str = "",
+        fill_time: str = "",
+    ):
+        """Log actual order fill (execution)."""
+        self._get_file_handler()
+
+        msg = f"ORDER_FILLED | {side} {symbol} | qty={quantity} @ ${price:.2f} | order_no={order_no} | time={fill_time}"
+        self.logger.info(msg)
+
+        # Telegram notification - 체결
+        emoji = "\u2705" if side == "BUY" else "\U0001F4B0"
+        tg_msg = (
+            f"{emoji} <b>주문 체결</b>\n"
+            f"종목: <code>{symbol}</code>\n"
+            f"구분: {side}\n"
+            f"수량: {quantity}주\n"
+            f"체결가: ${price:.2f}\n"
+            f"주문번호: {order_no}"
+        )
+        self._send_telegram(tg_msg)
+
+        self._write_json_log({
+            "timestamp": datetime.now().isoformat(),
+            "event": "ORDER_FILLED",
+            "symbol": symbol,
+            "side": side,
+            "quantity": quantity,
+            "price": price,
+            "order_no": order_no,
+            "fill_time": fill_time,
         })
 
     def log_price_check(
