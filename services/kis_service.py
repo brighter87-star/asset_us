@@ -277,6 +277,240 @@ class KISAPIClient:
 
         return all_trades
 
+    def get_current_price(self, symbol, exchange_code="NAS"):
+        """
+        해외주식 현재가 조회 (GET /uapi/overseas-price/v1/quotations/price)
+
+        TR_ID: HHDFS00000300
+
+        Args:
+            symbol: 종목코드 (AAPL, TSLA 등)
+            exchange_code: 거래소코드 (NAS, NYS, AMS, HKS, SHS, SZS, TSE, HNX, HSX)
+                          - NAS: 나스닥, NYS: 뉴욕, AMS: 아멕스
+
+        Returns:
+            dict: 현재가 정보 (last, open, high, low, etc.)
+        """
+        url = f"{self.base_url}/uapi/overseas-price/v1/quotations/price"
+        tr_id = "HHDFS00000300"
+
+        headers = self._get_headers(tr_id)
+
+        params = {
+            "AUTH": "",
+            "EXCD": exchange_code,
+            "SYMB": symbol,
+        }
+
+        self._wait_for_rate_limit()
+
+        response = requests.get(url, headers=headers, params=params)
+
+        if response.status_code != 200:
+            raise Exception(f"Price request failed: {response.status_code} - {response.text}")
+
+        data = response.json()
+
+        if data.get("rt_cd") != "0":
+            raise Exception(f"API error: {data.get('msg_cd')} - {data.get('msg1')}")
+
+        output = data.get("output", {})
+        return {
+            "symbol": symbol,
+            "last": float(output.get("last", 0)),
+            "open": float(output.get("open", 0)),
+            "high": float(output.get("high", 0)),
+            "low": float(output.get("low", 0)),
+            "base": float(output.get("base", 0)),  # 전일종가
+            "diff": float(output.get("diff", 0)),  # 전일대비
+            "rate": float(output.get("rate", 0)),  # 등락률
+            "volume": int(output.get("tvol", 0)),
+        }
+
+    def get_buying_power(self, exchange_code="NASD", symbol="AAPL"):
+        """
+        해외주식 매수가능금액 조회
+
+        TR_ID: TTTS3007R
+
+        Args:
+            exchange_code: 거래소코드
+            symbol: 종목코드 (필수)
+
+        Returns:
+            dict: 매수가능금액 정보
+        """
+        url = f"{self.base_url}/uapi/overseas-stock/v1/trading/inquire-psamount"
+        tr_id = "TTTS3007R"
+
+        headers = self._get_headers(tr_id)
+
+        params = {
+            "CANO": self.cano,
+            "ACNT_PRDT_CD": self.acnt_prdt_cd,
+            "OVRS_EXCG_CD": exchange_code,
+            "OVRS_ORD_UNPR": "100",
+            "ITEM_CD": symbol,
+        }
+
+        self._wait_for_rate_limit()
+
+        response = requests.get(url, headers=headers, params=params)
+
+        if response.status_code != 200:
+            raise Exception(f"Buying power request failed: {response.status_code} - {response.text}")
+
+        data = response.json()
+
+        if data.get("rt_cd") != "0":
+            raise Exception(f"API error: {data.get('msg_cd')} - {data.get('msg1')}")
+
+        output = data.get("output", {})
+        return {
+            "currency": output.get("tr_crcy_cd", "USD"),
+            "available_amt": float(output.get("ovrs_ord_psbl_amt", 0)),
+            "exchange_rate": float(output.get("exrt", 0)),
+        }
+
+    def buy_order(self, symbol, quantity, price, exchange_code="NASD", order_type="00"):
+        """
+        해외주식 매수 주문
+
+        TR_ID: TTTT1002U (미국 매수)
+
+        Args:
+            symbol: 종목코드
+            quantity: 주문수량
+            price: 주문가격 (지정가)
+            exchange_code: 거래소코드
+            order_type: 주문유형 (00: 지정가)
+
+        Returns:
+            dict: 주문 결과 (주문번호 등)
+        """
+        url = f"{self.base_url}/uapi/overseas-stock/v1/trading/order"
+        tr_id = "TTTT1002U"
+
+        headers = self._get_headers(tr_id)
+
+        body = {
+            "CANO": self.cano,
+            "ACNT_PRDT_CD": self.acnt_prdt_cd,
+            "OVRS_EXCG_CD": exchange_code,
+            "PDNO": symbol,
+            "ORD_QTY": str(int(quantity)),
+            "OVRS_ORD_UNPR": f"{price:.2f}",
+            "ORD_SVR_DVSN_CD": "0",
+            "ORD_DVSN": order_type,
+        }
+
+        self._wait_for_rate_limit()
+
+        response = requests.post(url, headers=headers, data=json.dumps(body))
+
+        if response.status_code != 200:
+            raise Exception(f"Buy order failed: {response.status_code} - {response.text}")
+
+        data = response.json()
+
+        if data.get("rt_cd") != "0":
+            raise Exception(f"Order error: {data.get('msg_cd')} - {data.get('msg1')}")
+
+        output = data.get("output", {})
+        return {
+            "order_no": output.get("ODNO", ""),
+            "order_time": output.get("ORD_TMD", ""),
+            "message": data.get("msg1", ""),
+        }
+
+    def sell_order(self, symbol, quantity, price, exchange_code="NASD", order_type="00"):
+        """
+        해외주식 매도 주문
+
+        TR_ID: TTTT1006U (미국 매도)
+
+        Args:
+            symbol: 종목코드
+            quantity: 주문수량
+            price: 주문가격 (지정가)
+            exchange_code: 거래소코드
+            order_type: 주문유형 (00: 지정가)
+
+        Returns:
+            dict: 주문 결과
+        """
+        url = f"{self.base_url}/uapi/overseas-stock/v1/trading/order"
+        tr_id = "TTTT1006U"
+
+        headers = self._get_headers(tr_id)
+
+        body = {
+            "CANO": self.cano,
+            "ACNT_PRDT_CD": self.acnt_prdt_cd,
+            "OVRS_EXCG_CD": exchange_code,
+            "PDNO": symbol,
+            "ORD_QTY": str(int(quantity)),
+            "OVRS_ORD_UNPR": f"{price:.2f}",
+            "ORD_SVR_DVSN_CD": "0",
+            "ORD_DVSN": order_type,
+        }
+
+        self._wait_for_rate_limit()
+
+        response = requests.post(url, headers=headers, data=json.dumps(body))
+
+        if response.status_code != 200:
+            raise Exception(f"Sell order failed: {response.status_code} - {response.text}")
+
+        data = response.json()
+
+        if data.get("rt_cd") != "0":
+            raise Exception(f"Order error: {data.get('msg_cd')} - {data.get('msg1')}")
+
+        output = data.get("output", {})
+        return {
+            "order_no": output.get("ODNO", ""),
+            "order_time": output.get("ORD_TMD", ""),
+            "message": data.get("msg1", ""),
+        }
+
+    def get_pending_orders(self, exchange_code="NASD"):
+        """
+        해외주식 미체결 조회
+
+        TR_ID: TTTS3018R
+
+        Returns:
+            list: 미체결 주문 리스트
+        """
+        url = f"{self.base_url}/uapi/overseas-stock/v1/trading/inquire-nccs"
+        tr_id = "TTTS3018R"
+
+        headers = self._get_headers(tr_id)
+
+        params = {
+            "CANO": self.cano,
+            "ACNT_PRDT_CD": self.acnt_prdt_cd,
+            "OVRS_EXCG_CD": exchange_code,
+            "SORT_SQN": "DS",
+            "CTX_AREA_FK200": "",
+            "CTX_AREA_NK200": "",
+        }
+
+        self._wait_for_rate_limit()
+
+        response = requests.get(url, headers=headers, params=params)
+
+        if response.status_code != 200:
+            raise Exception(f"Pending orders request failed: {response.status_code} - {response.text}")
+
+        data = response.json()
+
+        if data.get("rt_cd") != "0":
+            raise Exception(f"API error: {data.get('msg_cd')} - {data.get('msg1')}")
+
+        return data.get("output", [])
+
 
 # 테스트용 코드
 if __name__ == "__main__":

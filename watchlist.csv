@@ -1,0 +1,4 @@
+ticker,target_price,stop_loss_pct
+AAPL,200.00,
+NVDA,120.00,
+TSLA,300.00,5.0

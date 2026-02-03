@@ -21,6 +21,10 @@ ENV/
 
 # Logs
 *.log
+logs/
+
+# Runtime files
+.positions.json
 
 # OS
 .DS_Store
