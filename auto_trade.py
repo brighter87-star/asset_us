@@ -295,25 +295,32 @@ def show_live_status(monitor: MonitorService, prices: dict, holdings_prices: dic
     if positions:
         stop_loss_pct = monitor.trading_settings.STOP_LOSS_PCT
         print(f"\n[Holdings Stop Loss Monitor]")
-        print(f"{'CODE':<8} {'NAME':<12} {'ENTRY($)':>12} {'CURRENT($)':>12} {'P/L%':>10} {'STOP($)':>12} {'STATUS':>8}")
-        print("-" * 90)
+        print(f"{'Ticker':<8} {'ENTRY($)':>12} {'CURRENT($)':>12} {'P/L%':>10} {'STOP($)':>12} {'STATUS':>8}")
+        print("-" * 75)
 
+        # Build list with P/L% for sorting
+        holdings_data = []
         for symbol, pos in positions.items():
             entry = pos.get('entry_price', 0)
             stop_loss = pos.get('stop_loss_price', 0)
-            qty = pos.get('quantity', 0)
 
             price_data = prices.get(symbol, {})
             current = price_data.get('last', 0)
             if current <= 0:
                 current = holdings_prices.get(symbol, {}).get('last', 0)
 
-            # 종목명 (watchlist에서 찾기)
-            watchlist_item = next((w for w in monitor.watchlist if w['ticker'] == symbol), None)
-            name = symbol  # 미국주식은 티커로 표시
-
             if current > 0 and entry > 0:
                 pnl_pct = ((current - entry) / entry) * 100
+            else:
+                pnl_pct = -9999  # Unknown at bottom
+
+            holdings_data.append((symbol, entry, current, pnl_pct, stop_loss))
+
+        # Sort by P/L% descending
+        holdings_data.sort(key=lambda x: x[3], reverse=True)
+
+        for symbol, entry, current, pnl_pct, stop_loss in holdings_data:
+            if current > 0 and entry > 0:
                 pnl_str = f"{pnl_pct:+.1f}%"
 
                 if current <= stop_loss:
@@ -323,11 +330,11 @@ def show_live_status(monitor: MonitorService, prices: dict, holdings_prices: dic
                 else:
                     status = "OK"
 
-                print(f"{symbol:<8} {name:<12} {entry:>12,.2f} {current:>12,.2f} {pnl_str:>10} {stop_loss:>12,.2f} {status:>8}")
+                print(f"{symbol:<8} {entry:>12,.2f} {current:>12,.2f} {pnl_str:>10} {stop_loss:>12,.2f} {status:>8}")
             else:
-                print(f"{symbol:<8} {name:<12} {entry:>12,.2f} {'---':>12} {'---':>10} {stop_loss:>12,.2f} {'---':>8}")
+                print(f"{symbol:<8} {entry:>12,.2f} {'---':>12} {'---':>10} {stop_loss:>12,.2f} {'---':>8}")
 
-        print("-" * 90)
+        print("-" * 75)
 
     # Bot Trades Today section
     bot_triggers = monitor.daily_triggers
