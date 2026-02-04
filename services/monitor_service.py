@@ -201,6 +201,27 @@ class MonitorService:
             else:
                 print("[TRIGGERS] No trades today")
 
+    def has_today_db_buy(self, symbol: str) -> bool:
+        """
+        Safety check: directly query DB to see if we already bought this symbol today.
+        This prevents double-buying even if daily_triggers fails to load.
+        """
+        try:
+            from db.connection import get_connection
+            today_et = self._get_today_et()
+            conn = get_connection()
+            with conn.cursor() as cur:
+                cur.execute("""
+                    SELECT COUNT(*) FROM account_trade_history
+                    WHERE stk_cd = %s AND trade_date = %s AND io_tp_nm LIKE '%%매수%%'
+                """, (symbol, today_et))
+                count = cur.fetchone()[0]
+            conn.close()
+            return count > 0
+        except Exception as e:
+            # On error, check daily_triggers as fallback
+            return symbol in self.daily_triggers
+
     def _save_daily_triggers(self):
         """Save daily triggers to file (US ET date)."""
         try:
@@ -632,6 +653,10 @@ class MonitorService:
         if today_triggers >= 1:
             return False
 
+        # Safety check: directly query DB to prevent double-buy on bot restart
+        if self.has_today_db_buy(symbol):
+            return False
+
         # Get current price
         price_data = self.get_price(symbol)
         if not price_data:
@@ -672,6 +697,10 @@ class MonitorService:
         # Count today's bot triggers for this symbol
         today_triggers = self.daily_triggers.get(symbol, {}).get("trigger_count", 0)
         if today_triggers >= 1:
+            return False
+
+        # Safety check: directly query DB to prevent double-buy on bot restart
+        if self.has_today_db_buy(symbol):
             return False
 
         price_data = self.get_price(symbol)
