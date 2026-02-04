@@ -68,13 +68,14 @@ class MonitorService:
         self._pre_market_reloaded: bool = False  # Track pre-market reload
         self._price_cache: Dict[str, dict] = {}  # Cache from poller
         self._total_assets: float = 0  # Cached total assets for unit calculation
-        self._load_daily_triggers()  # Load persisted bot trades
+        self._last_triggers_hash: str = ""  # Track changes to avoid repeated logs
+        self._load_daily_triggers(verbose=True)  # Load persisted bot trades
 
     def _get_today_et(self) -> date:
         """Get today's date in US Eastern time."""
         return datetime.now(ET).date()
 
-    def _load_daily_triggers(self):
+    def _load_daily_triggers(self, verbose: bool = False):
         """
         Load daily triggers from both DB and JSON file.
         - DB: source of truth for completed/synced trades
@@ -88,6 +89,9 @@ class MonitorService:
 
         # 2. Load from DB (source of truth, will add any missing)
         self._load_today_trades_from_db(today_et)
+
+        # 3. Only log if changed or verbose
+        self._log_triggers_if_changed(verbose)
 
     def _load_triggers_from_json(self, today_et: date):
         """Load triggers from JSON file (backup for API sync delay)."""
@@ -103,8 +107,6 @@ class MonitorService:
                     for symbol, info in json_triggers.items():
                         if symbol not in self.daily_triggers:
                             self.daily_triggers[symbol] = info
-                    if json_triggers:
-                        print(f"[TRIGGERS] Loaded {len(json_triggers)} from JSON backup")
         except Exception as e:
             print(f"[WARN] Failed to load from JSON: {e}")
 
@@ -171,18 +173,33 @@ class MonitorService:
                 if symbol in self.daily_triggers:
                     self.daily_triggers[symbol]["sold"] = True
 
-            if db_added > 0:
-                print(f"[TRIGGERS] Added {db_added} from DB")
-            if self.daily_triggers:
-                symbols = list(self.daily_triggers.keys())
-                print(f"[TRIGGERS] Total: {len(symbols)} triggers: {symbols}")
-            if sold_symbols:
-                print(f"[TRIGGERS] Sold today: {sold_symbols}")
-
         except Exception as e:
             print(f"[WARN] Failed to load trades from database: {e}")
             import traceback
             traceback.print_exc()
+
+    def _log_triggers_if_changed(self, force: bool = False):
+        """Log triggers only if changed since last log."""
+        # Create hash of current state
+        trigger_items = []
+        for symbol, info in sorted(self.daily_triggers.items()):
+            sold = "SOLD" if info.get("sold") else ""
+            trigger_items.append(f"{symbol}{sold}")
+        current_hash = ",".join(trigger_items)
+
+        # Only log if changed or forced
+        if force or current_hash != self._last_triggers_hash:
+            self._last_triggers_hash = current_hash
+            if self.daily_triggers:
+                parts = []
+                for symbol, info in sorted(self.daily_triggers.items()):
+                    if info.get("sold"):
+                        parts.append(f"{symbol}(SOLD)")
+                    else:
+                        parts.append(symbol)
+                print(f"[TRIGGERS] Today's trades: {', '.join(parts)}")
+            else:
+                print("[TRIGGERS] No trades today")
 
     def _save_daily_triggers(self):
         """Save daily triggers to file (US ET date)."""
