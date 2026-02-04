@@ -386,9 +386,14 @@ def show_live_status(monitor: MonitorService, prices: dict, holdings_prices: dic
 
         stop_loss_pct = monitor.trading_settings.STOP_LOSS_PCT
 
+        # Get sold symbols from API (for manual sells detection)
+        api_sells = monitor._load_today_api_sells()
+
+        # Build list for sorting
+        trade_rows = []
         for symbol, trigger_info in bot_triggers.items():
             entry_price = trigger_info.get('entry_price', 0)
-            is_sold = trigger_info.get('sold', False)
+            is_sold = trigger_info.get('sold', False) or (symbol in api_sells)
 
             watchlist_item = next((w for w in monitor.watchlist if w['ticker'] == symbol), None)
             target = watchlist_item['target_price'] if watchlist_item else entry_price
@@ -405,15 +410,29 @@ def show_live_status(monitor: MonitorService, prices: dict, holdings_prices: dic
                 if is_sold:
                     status = "SOLD"
                 elif return_pct <= -stop_loss_pct:
-                    status = "STOP HIT!"  # At stop loss threshold but not yet sold
+                    status = "STOP HIT!"
                 elif return_pct < 0:
                     status = "HOLDING -"
                 else:
                     status = "HOLDING +"
 
+                trade_rows.append((symbol, target, entry_price, current, return_pct, return_str, status))
+            else:
+                # No price available - check if sold via API
+                if is_sold:
+                    trade_rows.append((symbol, target, entry_price, 0, -999, "---", "SOLD"))
+                else:
+                    trade_rows.append((symbol, target, entry_price, 0, -999, "---", "LOADING"))
+
+        # Sort: status priority (SOLD first, then HOLDING+, HOLDING-, STOP HIT!, LOADING), then return desc
+        status_order = {"SOLD": 0, "HOLDING +": 1, "HOLDING -": 2, "STOP HIT!": 3, "LOADING": 4}
+        trade_rows.sort(key=lambda x: (status_order.get(x[6], 5), -x[4]))
+
+        for symbol, target, entry_price, current, return_pct, return_str, status in trade_rows:
+            if current > 0:
                 print(f"{symbol:<8} {target:>10,.2f} {entry_price:>10,.2f} {current:>12,.2f} {return_str:>10} {status:>12}")
             else:
-                print(f"{symbol:<8} {target:>10,.2f} {entry_price:>10,.2f} {'---':>12} {'---':>10} {'LOADING':>12}")
+                print(f"{symbol:<8} {target:>10,.2f} {entry_price:>10,.2f} {'---':>12} {return_str:>10} {status:>12}")
 
         print("-" * 75)
     else:
