@@ -69,6 +69,8 @@ class MonitorService:
         self._price_cache: Dict[str, dict] = {}  # Cache from poller
         self._total_assets: float = 0  # Cached total assets for unit calculation
         self._last_triggers_hash: str = ""  # Track changes to avoid repeated logs
+        self._skipped_symbols: Dict[str, float] = {}  # Track skipped symbols with timestamp (for one-time logging)
+        self._today_api_buys: Optional[set] = None  # Cache today's API buy symbols
         self._load_daily_triggers(verbose=True)  # Load persisted bot trades
 
     def _get_today_et(self) -> date:
@@ -200,6 +202,50 @@ class MonitorService:
                 print(f"[TRIGGERS] Today's trades: {', '.join(parts)}")
             else:
                 print("[TRIGGERS] No trades today")
+
+    def _load_today_api_buys(self) -> set:
+        """
+        Load today's buy orders directly from KIS API.
+        Most reliable source - doesn't depend on DB sync.
+        Cached to avoid repeated API calls within same session.
+        """
+        if self._today_api_buys is not None:
+            return self._today_api_buys
+
+        today_et = self._get_today_et()
+        today_str = today_et.strftime("%Y%m%d")
+        bought_symbols = set()
+
+        try:
+            # sll_buy_dvsn: 02 = 매수만
+            trades = self.client.get_trade_history(
+                start_date=today_str,
+                end_date=today_str,
+                exchange_code="%",
+                sll_buy_dvsn="02",  # 매수만
+            )
+            for trade in trades:
+                symbol = trade.get("pdno", "").strip()
+                if symbol:
+                    bought_symbols.add(symbol)
+
+            if bought_symbols:
+                print(f"[API] Today's buys from KIS API: {sorted(bought_symbols)}")
+
+            self._today_api_buys = bought_symbols
+        except Exception as e:
+            print(f"[WARN] Failed to get today's buys from API: {e}")
+            self._today_api_buys = set()
+
+        return self._today_api_buys
+
+    def has_today_api_buy(self, symbol: str) -> bool:
+        """
+        Safety check: query KIS API directly for today's buy orders.
+        Most reliable - doesn't depend on DB sync.
+        """
+        api_buys = self._load_today_api_buys()
+        return symbol in api_buys
 
     def has_today_db_buy(self, symbol: str) -> bool:
         """
@@ -632,6 +678,27 @@ class MonitorService:
 
         return 0
 
+    def _should_log_skip(self, symbol: str) -> bool:
+        """
+        Check if we should log skip message for this symbol.
+        Returns True only once per symbol, then suppresses for 10 seconds.
+        """
+        import time
+        now = time.time()
+
+        # Clean up old entries (> 10 seconds)
+        expired = [s for s, t in self._skipped_symbols.items() if now - t > 10]
+        for s in expired:
+            del self._skipped_symbols[s]
+
+        # Check if already logged recently
+        if symbol in self._skipped_symbols:
+            return False
+
+        # Mark as logged
+        self._skipped_symbols[symbol] = now
+        return True
+
     def check_breakout_entry(self, item: dict) -> bool:
         """
         Check if breakout entry condition is met.
@@ -652,20 +719,28 @@ class MonitorService:
         if current_units >= max_units:
             return False
 
-        # Count today's bot triggers for this symbol
+        # === SAFETY CHECKS FIRST (before price check) ===
+
+        # 1. Check daily_triggers (in-memory, fastest)
         today_triggers = self.daily_triggers.get(symbol, {}).get("trigger_count", 0)
-
-        # Max 1 trigger per day per symbol (to avoid rapid-fire buying on volatile days)
         if today_triggers >= 1:
-            print(f"[{symbol}] Skipping: already triggered today (trigger_count={today_triggers})")
+            if self._should_log_skip(symbol):
+                print(f"[{symbol}] Skipping: already triggered today (trigger_count={today_triggers})")
             return False
 
-        # Safety check: directly query DB to prevent double-buy on bot restart
+        # 2. Check KIS API directly (most reliable, doesn't depend on DB sync)
+        if self.has_today_api_buy(symbol):
+            if self._should_log_skip(symbol):
+                print(f"[{symbol}] Skipping: KIS API shows today's buy")
+            return False
+
+        # 3. Check DB as additional safety (might have trades from manual buys)
         if self.has_today_db_buy(symbol):
-            print(f"[{symbol}] Skipping: DB shows today's buy")
+            if self._should_log_skip(symbol):
+                print(f"[{symbol}] Skipping: DB shows today's buy")
             return False
 
-        # Get current price
+        # === Now check price ===
         price_data = self.get_price(symbol)
         if not price_data:
             return False
@@ -702,15 +777,22 @@ class MonitorService:
         if current_units >= max_units:
             return False
 
-        # Count today's bot triggers for this symbol
+        # === SAFETY CHECKS FIRST ===
+
+        # 1. Check daily_triggers (in-memory)
         today_triggers = self.daily_triggers.get(symbol, {}).get("trigger_count", 0)
         if today_triggers >= 1:
             return False
 
-        # Safety check: directly query DB to prevent double-buy on bot restart
+        # 2. Check KIS API directly (most reliable)
+        if self.has_today_api_buy(symbol):
+            return False
+
+        # 3. Check DB as additional safety
         if self.has_today_db_buy(symbol):
             return False
 
+        # === Now check price ===
         price_data = self.get_price(symbol)
         if not price_data:
             return False
@@ -759,6 +841,9 @@ class MonitorService:
                 "trigger_count": trigger_count,
             }
             self._save_daily_triggers()  # Persist to file
+
+            # Clear API cache so next check sees the new trade
+            self._today_api_buys = None
 
             # Quick sync to update holdings and lots after trade
             self._quick_sync_after_trade()
