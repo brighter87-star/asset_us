@@ -37,6 +37,10 @@ class TradingSettings:
         self.UNIT: float = 1.0          # 총 몇 unit (0.5, 1, 2...)
         self.STOP_LOSS_PCT: float = 7.0 # 손절 %
         self.PRICE_BUFFER_PCT: float = 0.5  # 주문가 버퍼 % (현재가 * 1.005)
+        # Volume filter settings (optional)
+        self.VOLUME_FILTER_ENABLED: float = 0.0  # 0=off, 1=on (float for CSV compatibility)
+        self.VOLUME_MULTIPLIER: float = 2.0  # 현재 거래량 > 시간보정 평균 × 배수
+        self.VOLUME_LOOKBACK_DAYS: float = 5.0  # 평균 계산 일수
 
     def update(self, key: str, value):
         """Update setting value."""
@@ -757,17 +761,20 @@ class MonitorService:
 
         # Get PURCHASE COST from holdings (not market value)
         try:
+            from datetime import date
             from db.connection import get_connection
+            today = date.today()
             conn = get_connection()
             with conn.cursor() as cur:
                 # Use pur_amt (purchase amount) instead of evlt_amt (evaluation amount)
+                # Filter by today's date AND rmnd_qty > 0 (actually holding shares)
                 cur.execute("""
-                    SELECT pur_amt FROM holdings
-                    WHERE stk_cd = %s
-                    ORDER BY snapshot_date DESC LIMIT 1
-                """, (symbol,))
+                    SELECT pur_amt, rmnd_qty FROM holdings
+                    WHERE stk_cd = %s AND snapshot_date = %s AND rmnd_qty > 0
+                    LIMIT 1
+                """, (symbol, today))
                 row = cur.fetchone()
-                if row and row[0]:
+                if row and row[0] and row[1] > 0:
                     purchase_cost = float(row[0])
                     current_units = purchase_cost / unit_value
                     return current_units
