@@ -4,6 +4,7 @@ Monitor service for price monitoring and trading strategy execution.
 
 import json
 import os
+import time as time_module
 import pandas as pd
 from datetime import datetime, date, time
 from pathlib import Path
@@ -81,7 +82,7 @@ class MonitorService:
 
         # Sync trade history on startup to ensure DB is up-to-date
         self._startup_sync()
-        self._last_holdings_refresh = time.time()  # Mark startup as first refresh
+        self._last_holdings_refresh = time_module.time()  # Mark startup as first refresh
 
         self._load_daily_triggers(verbose=True)  # Load persisted bot trades
         self._merge_api_buys_to_triggers()  # Also load from KIS API directly
@@ -818,7 +819,7 @@ class MonitorService:
         Returns True only once per symbol, then suppresses for 10 seconds.
         """
         import time
-        now = time.time()
+        now = time_module.time()
 
         # Clean up old entries (> 10 seconds)
         expired = [s for s, t in self._skipped_symbols.items() if now - t > 10]
@@ -1021,7 +1022,7 @@ class MonitorService:
             try:
                 print("[SYNC] Refreshing holdings (30s after trade)...")
                 self.refresh_holdings()
-                self._last_holdings_refresh = time.time()
+                self._last_holdings_refresh = time_module.time()
             except Exception as e:
                 print(f"[WARN] Delayed holdings refresh failed: {e}")
 
