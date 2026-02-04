@@ -62,9 +62,10 @@ def sync_holdings_from_kis(
     if snapshot_date is None:
         snapshot_date = date.today()
 
-    # 모든 거래소에서 잔고 조회
+    # US 거래소에서만 잔고 조회 (NASD, NYSE, AMEX)
+    US_EXCHANGES = [("NASD", "USD"), ("NYSE", "USD"), ("AMEX", "USD")]
     all_holdings = []
-    for exchange_code, currency in EXCHANGE_CURRENCY_MAP.items():
+    for exchange_code, currency in US_EXCHANGES:
         try:
             holdings = client.get_holdings(exchange_code=exchange_code, currency=currency)
             for h in holdings:
@@ -171,23 +172,21 @@ def sync_trade_history_from_kis(
         # 기본: 1년 전부터
         start_date = (date.today().replace(year=date.today().year - 1)).strftime("%Y%m%d")
 
-    # 모든 거래소에서 체결내역 조회
+    # 모든 거래소에서 체결내역 조회 (exchange_code="%" 로 한번에)
     all_trades = []
-    for exchange_code in EXCHANGE_CURRENCY_MAP.keys():
-        try:
-            trades = client.get_trade_history(
-                start_date=start_date,
-                end_date=end_date,
-                exchange_code=exchange_code,
-            )
-            for t in trades:
-                t["_exchange_code"] = exchange_code
-            all_trades.extend(trades)
-        except Exception as e:
-            if "no data" not in str(e).lower():
-                print(f"  Warning: {exchange_code} trade history fetch failed: {e}")
-            else:
-                print(f"  {exchange_code}: no trades found")
+    try:
+        trades = client.get_trade_history(
+            start_date=start_date,
+            end_date=end_date,
+            exchange_code="%",  # All exchanges at once
+        )
+        for t in trades:
+            # 거래소 코드 추출 (ovrs_excg_cd 또는 기본값)
+            t["_exchange_code"] = t.get("ovrs_excg_cd", "NASD")
+        all_trades.extend(trades)
+    except Exception as e:
+        if "no data" not in str(e).lower():
+            print(f"  Warning: trade history fetch failed: {e}")
 
     if not all_trades:
         print("  No trades found")
