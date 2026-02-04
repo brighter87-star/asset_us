@@ -21,11 +21,13 @@ def format_number(value, decimals=0):
     return f"{float(value):,.{decimals}f}"
 
 
-def format_currency(value, decimals=2):
-    """Format currency in USD."""
+def format_currency(value, decimals=2, show_sign=False):
+    """Format currency in USD (without $ symbol)."""
     if value is None:
         return "N/A"
-    return f"${float(value):,.{decimals}f}"
+    if show_sign:
+        return f"{float(value):+,.{decimals}f}"
+    return f"{float(value):,.{decimals}f}"
 
 
 def format_percentage(value, decimals=2):
@@ -52,25 +54,24 @@ def view_portfolio():
             return
 
         # Header
-        print("=" * 110)
+        print("=" * 95)
         print(f"Portfolio - {date.today()} (US Stocks)")
-        print("=" * 110)
+        print("=" * 95)
 
-        # Table header
-        print(f"\n{'Stock':<25} {'Qty':>6} {'Avg Cost':>12} {'Current':>12} {'Value':>14} {'P&L':>12} {'Return':>10}")
-        print("-" * 110)
+        # Table header ($ in labels only)
+        print(f"\n{'Ticker':<8} {'Qty':>5} {'Avg($)':>10} {'Cur($)':>10} {'Value($)':>12} {'P&L($)':>12} {'Return':>10}")
+        print("-" * 95)
 
         total_cost = 0
         total_market_value = 0
         total_pnl = 0
 
         for lot in lots:
-            stock_name = lot['stock_name'] or 'Unknown'
             stock_code = lot['stock_code']
             crd_class = lot['crd_class']
 
-            # Truncate long stock names
-            display_name = f"{stock_name[:18]}..." if len(stock_name) > 18 else stock_name
+            # Use ticker symbol
+            display_name = stock_code
             if crd_class == 'CREDIT':
                 display_name = f"{display_name}*"
 
@@ -87,23 +88,23 @@ def view_portfolio():
             total_market_value += market_value
             total_pnl += pnl
 
-            print(f"{display_name:<25} {format_number(qty):>6} "
-                  f"{format_currency(avg_cost):>12} {format_currency(current):>12} "
-                  f"{format_currency(market_value):>14} {format_currency(pnl):>12} "
+            print(f"{display_name:<8} {qty:>5} "
+                  f"{format_currency(avg_cost):>10} {format_currency(current):>10} "
+                  f"{format_currency(market_value):>12} {format_currency(pnl, show_sign=True):>12} "
                   f"{format_percentage(return_pct):>10}")
 
         # Summary
-        print("-" * 110)
+        print("-" * 95)
         total_return_pct = (total_pnl / total_cost * 100) if total_cost > 0 else 0
-        print(f"{'TOTAL':<25} {'':<6} {'':<12} {'':<12} "
-              f"{format_currency(total_market_value):>14} {format_currency(total_pnl):>12} "
+        print(f"{'TOTAL':<8} {'':<5} {'':>10} {'':>10} "
+              f"{format_currency(total_market_value):>12} {format_currency(total_pnl, show_sign=True):>12} "
               f"{format_percentage(total_return_pct):>10}")
 
-        print("\n" + "=" * 110)
-        print(f"Total Stock Value:  {format_currency(total_market_value)}")
-        print(f"Total Invested:     {format_currency(total_cost)}")
-        print(f"Total P&L:          {format_currency(total_pnl)} ({format_percentage(total_return_pct)})")
-        print("=" * 110)
+        print("\n" + "=" * 95)
+        print(f"Total Value:   ${format_currency(total_market_value)}")
+        print(f"Total Cost:    ${format_currency(total_cost)}")
+        print(f"Total P&L:     ${format_currency(total_pnl, show_sign=True)} ({format_percentage(total_return_pct)})")
+        print("=" * 95)
         print("\n* Credit position")
 
     finally:
@@ -160,13 +161,13 @@ def view_position_detail(stock_code: str):
 
             print(f"\nLot #{i} - {trade_date}{credit_mark}")
             print("-" * 100)
-            print(f"  Quantity:       {format_number(net_quantity):>10} shares")
-            print(f"  Purchase Price: {format_currency(avg_price):>15}")
-            print(f"  Current Price:  {format_currency(current_price):>15}")
-            print(f"  Total Cost:     {format_currency(cost):>15}")
-            print(f"  Market Value:   {format_currency(current_price * net_quantity if current_price else 0):>15}")
-            print(f"  P&L:            {format_currency(pnl):>15} ({format_percentage(return_pct)})")
-            print(f"  Holding Days:   {format_number(holding_days):>10} days")
+            print(f"  Quantity:       {format_number(net_quantity):>12} shares")
+            print(f"  Purchase Price: ${format_currency(avg_price):>12}")
+            print(f"  Current Price:  ${format_currency(current_price):>12}")
+            print(f"  Total Cost:     ${format_currency(cost):>12}")
+            print(f"  Market Value:   ${format_currency(current_price * net_quantity if current_price else 0):>12}")
+            print(f"  P&L:            ${format_currency(pnl, show_sign=True):>12} ({format_percentage(return_pct)})")
+            print(f"  Holding Days:   {format_number(holding_days):>12} days")
 
         # Summary
         print("\n" + "=" * 100)
@@ -174,18 +175,18 @@ def view_position_detail(stock_code: str):
         print("=" * 100)
         print(f"Total Lots:     {len(lots)}")
         print(f"Total Quantity: {format_number(total_qty)} shares")
-        print(f"Total Cost:     {format_currency(total_cost)}")
+        print(f"Total Cost:     ${format_currency(total_cost)}")
 
         avg_price_overall = total_cost / total_qty if total_qty > 0 else 0
-        print(f"Average Price:  {format_currency(avg_price_overall)}")
+        print(f"Average Price:  ${format_currency(avg_price_overall)}")
 
         current_price = lots[0]['current_price'] if lots else 0
         market_value = current_price * total_qty if current_price else 0
-        print(f"Current Price:  {format_currency(current_price)}")
-        print(f"Market Value:   {format_currency(market_value)}")
+        print(f"Current Price:  ${format_currency(current_price)}")
+        print(f"Market Value:   ${format_currency(market_value)}")
 
         total_return_pct = (total_pnl / total_cost * 100) if total_cost > 0 else 0
-        print(f"Total P&L:      {format_currency(total_pnl)} ({format_percentage(total_return_pct)})")
+        print(f"Total P&L:      ${format_currency(total_pnl, show_sign=True)} ({format_percentage(total_return_pct)})")
         print("=" * 100)
 
     finally:
