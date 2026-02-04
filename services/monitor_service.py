@@ -70,31 +70,93 @@ class MonitorService:
         self._total_assets: float = 0  # Cached total assets for unit calculation
         self._load_daily_triggers()  # Load persisted bot trades
 
+    def _get_today_et(self) -> date:
+        """Get today's date in US Eastern time."""
+        return datetime.now(ET).date()
+
     def _load_daily_triggers(self):
-        """Load daily triggers from file (only if same day)."""
+        """Load daily triggers from file and database (US ET date)."""
+        today_et = self._get_today_et()
+
+        # 1. Try loading from JSON file first
         try:
             if DAILY_TRIGGERS_FILE.exists():
                 with open(DAILY_TRIGGERS_FILE, "r", encoding="utf-8") as f:
                     data = json.load(f)
 
-                # Only load if same date
+                # Only load if same date (US ET)
                 saved_date = data.get("date")
-                if saved_date == str(date.today()):
+                if saved_date == str(today_et):
                     self.daily_triggers = data.get("triggers", {})
-                    print(f"[TRIGGERS] Loaded {len(self.daily_triggers)} bot trades from today")
+                    print(f"[TRIGGERS] Loaded {len(self.daily_triggers)} bot trades from file")
                 else:
-                    # Different day, start fresh
                     self.daily_triggers = {}
-                    print(f"[TRIGGERS] New day, cleared previous triggers")
+                    print(f"[TRIGGERS] New trading day (ET), starting fresh")
         except Exception as e:
-            print(f"[WARN] Failed to load daily triggers: {e}")
+            print(f"[WARN] Failed to load daily triggers from file: {e}")
             self.daily_triggers = {}
 
-    def _save_daily_triggers(self):
-        """Save daily triggers to file."""
+        # 2. Also load from database for today's trades (in case file was lost)
+        self._load_today_trades_from_db(today_et)
+
+    def _load_today_trades_from_db(self, today_et: date):
+        """Load today's bot trades from database to supplement file data."""
         try:
+            from db.connection import get_connection
+            conn = get_connection()
+            with conn.cursor() as cur:
+                # Get today's buy trades (매수)
+                cur.execute("""
+                    SELECT stk_cd, cntr_uv, ord_tm
+                    FROM account_trade_history
+                    WHERE trade_date = %s AND io_tp_nm LIKE '%%매수%%'
+                    ORDER BY ord_tm
+                """, (today_et,))
+                buys = cur.fetchall()
+
+                # Get today's sell trades (매도) - for stop loss detection
+                cur.execute("""
+                    SELECT stk_cd, cntr_uv, ord_tm
+                    FROM account_trade_history
+                    WHERE trade_date = %s AND io_tp_nm LIKE '%%매도%%'
+                    ORDER BY ord_tm
+                """, (today_et,))
+                sells = cur.fetchall()
+            conn.close()
+
+            # Track sold symbols
+            sold_symbols = set(row[0] for row in sells)
+
+            # Add any trades from DB that aren't in our triggers
+            db_count = 0
+            for stk_cd, cntr_uv, ord_tm in buys:
+                if stk_cd not in self.daily_triggers:
+                    self.daily_triggers[stk_cd] = {
+                        "entry_type": "db_loaded",
+                        "entry_time": str(ord_tm) if ord_tm else "",
+                        "entry_price": float(cntr_uv) if cntr_uv else 0,
+                        "trigger_count": 1,
+                        "sold": stk_cd in sold_symbols,
+                    }
+                    db_count += 1
+                elif stk_cd in sold_symbols:
+                    # Mark as sold if we have a sell record
+                    self.daily_triggers[stk_cd]["sold"] = True
+
+            if db_count > 0:
+                print(f"[TRIGGERS] Loaded {db_count} additional trades from database")
+            if sold_symbols:
+                print(f"[TRIGGERS] Sold today: {sold_symbols}")
+
+        except Exception as e:
+            print(f"[WARN] Failed to load trades from database: {e}")
+
+    def _save_daily_triggers(self):
+        """Save daily triggers to file (US ET date)."""
+        try:
+            today_et = self._get_today_et()
             data = {
-                "date": str(date.today()),
+                "date": str(today_et),
                 "triggers": self.daily_triggers,
             }
             with open(DAILY_TRIGGERS_FILE, "w", encoding="utf-8") as f:

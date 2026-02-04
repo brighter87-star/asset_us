@@ -380,7 +380,7 @@ def show_live_status(monitor: MonitorService, prices: dict, holdings_prices: dic
     # Bot Trades Today section
     bot_triggers = monitor.daily_triggers
     if bot_triggers:
-        print(f"\n[Bot Trades Today] (auto-executed only)")
+        print(f"\n[Bot Trades Today] (US ET: {monitor._get_today_et()})")
         print(f"{'Symbol':<8} {'Target($)':>10} {'Entry($)':>10} {'Current($)':>12} {'Return':>10} {'Status':>12}")
         print("-" * 75)
 
@@ -388,6 +388,7 @@ def show_live_status(monitor: MonitorService, prices: dict, holdings_prices: dic
 
         for symbol, trigger_info in bot_triggers.items():
             entry_price = trigger_info.get('entry_price', 0)
+            is_sold = trigger_info.get('sold', False)
 
             watchlist_item = next((w for w in monitor.watchlist if w['ticker'] == symbol), None)
             target = watchlist_item['target_price'] if watchlist_item else entry_price
@@ -401,7 +402,9 @@ def show_live_status(monitor: MonitorService, prices: dict, holdings_prices: dic
                 return_pct = ((current - entry_price) / entry_price) * 100
                 return_str = f"{return_pct:+.2f}%"
 
-                if return_pct <= -stop_loss_pct:
+                if is_sold:
+                    status = "SOLD"
+                elif return_pct <= -stop_loss_pct:
                     status = "STOP LOSS"
                 elif return_pct < 0:
                     status = "HOLDING -"
