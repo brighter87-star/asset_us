@@ -12,23 +12,23 @@ CRON_ENTRY="0 20 * * 1-5 TZ=America/New_York cd $PROJECT_DIR && python cron/dail
 # Create logs directory if not exists
 mkdir -p "$PROJECT_DIR/logs"
 
-# Check if cron entry already exists
-if crontab -l 2>/dev/null | grep -q "daily_sync.py"; then
-    echo "Cron job already exists. Current crontab:"
-    crontab -l | grep "daily_sync"
+# Check if cron entry already exists for THIS project (asset_us)
+if crontab -l 2>/dev/null | grep -q "asset_us.*daily_sync.py"; then
+    echo "Cron job for asset_us already exists. Current entry:"
+    crontab -l | grep "asset_us.*daily_sync"
     echo ""
     read -p "Replace existing entry? (y/n): " -n 1 -r
     echo
     if [[ $REPLY =~ ^[Yy]$ ]]; then
-        # Remove existing entry and add new one
-        (crontab -l 2>/dev/null | grep -v "daily_sync.py"; echo "$CRON_ENTRY") | crontab -
+        # Remove only asset_us entry and add new one
+        (crontab -l 2>/dev/null | grep -v "asset_us.*daily_sync.py"; echo "$CRON_ENTRY") | crontab -
         echo "Cron job updated."
     else
         echo "Cancelled."
         exit 0
     fi
 else
-    # Add new cron entry
+    # Add new cron entry (preserves existing entries from other projects)
     (crontab -l 2>/dev/null; echo "$CRON_ENTRY") | crontab -
     echo "Cron job added."
 fi
