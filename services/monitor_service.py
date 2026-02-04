@@ -71,8 +71,28 @@ class MonitorService:
         self._last_triggers_hash: str = ""  # Track changes to avoid repeated logs
         self._skipped_symbols: Dict[str, float] = {}  # Track skipped symbols with timestamp (for one-time logging)
         self._today_api_buys: Optional[set] = None  # Cache today's API buy symbols
+
+        # Sync trade history on startup to ensure DB is up-to-date
+        self._startup_sync()
+
         self._load_daily_triggers(verbose=True)  # Load persisted bot trades
         self._merge_api_buys_to_triggers()  # Also load from KIS API directly
+
+    def _startup_sync(self):
+        """Sync trade history from API to DB on startup."""
+        try:
+            from db.connection import get_connection
+            from services.data_sync_service import sync_trade_history_from_kis
+
+            print("[STARTUP] Syncing trade history from API...")
+            conn = get_connection()
+            try:
+                trade_count = sync_trade_history_from_kis(conn)
+                print(f"[STARTUP] Trade history synced: {trade_count} records")
+            finally:
+                conn.close()
+        except Exception as e:
+            print(f"[WARN] Startup sync failed: {e}")
 
     def _get_today_et(self) -> date:
         """Get today's date in US Eastern time."""
