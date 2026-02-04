@@ -206,6 +206,69 @@ class KISAPIClient:
 
         return all_holdings
 
+    def get_account_balance(self, exchange_code="NASD", currency="USD"):
+        """
+        해외주식 계좌잔고 조회 (외화잔고 포함)
+
+        TR_ID: TTTS3012R
+
+        Returns:
+            dict: 계좌 요약 정보
+                - frcr_evlu_amt2: 외화평가금액 (외화잔고 = 현금 + 주식평가)
+                - frcr_use_psbl_amt: 외화사용가능금액
+                - frcr_pchs_amt1: 외화매입금액
+                - ovrs_tot_pfls: 해외총손익
+                - tot_evlu_pfls_amt: 총평가손익금액
+        """
+        url = f"{self.base_url}/uapi/overseas-stock/v1/trading/inquire-balance"
+        tr_id = "TTTS3012R"
+
+        headers = self._get_headers(tr_id)
+
+        params = {
+            "CANO": self.cano,
+            "ACNT_PRDT_CD": self.acnt_prdt_cd,
+            "OVRS_EXCG_CD": exchange_code,
+            "TR_CRCY_CD": currency,
+            "CTX_AREA_FK200": "",
+            "CTX_AREA_NK200": "",
+        }
+
+        self._wait_for_rate_limit()
+
+        response = requests.get(url, headers=headers, params=params)
+
+        if response.status_code != 200:
+            raise Exception(f"Balance request failed: {response.status_code} - {response.text}")
+
+        data = response.json()
+
+        if data.get("rt_cd") != "0":
+            raise Exception(f"API error: {data.get('msg_cd')} - {data.get('msg1')}")
+
+        # output2가 계좌 요약 정보
+        output2 = data.get("output2", {})
+        output3 = data.get("output3", {})
+
+        # output2가 리스트일 수 있음
+        if isinstance(output2, list) and output2:
+            output2 = output2[0]
+
+        return {
+            "currency": currency,
+            "exchange_code": exchange_code,
+            # output2 필드들
+            "frcr_evlu_amt2": float(output2.get("frcr_evlu_amt2", 0) or 0),  # 외화평가금액2
+            "frcr_use_psbl_amt": float(output2.get("frcr_use_psbl_amt", 0) or 0),  # 외화사용가능금액
+            "frcr_pchs_amt1": float(output2.get("frcr_pchs_amt1", 0) or 0),  # 외화매입금액1
+            "ovrs_tot_pfls": float(output2.get("ovrs_tot_pfls", 0) or 0),  # 해외총손익
+            "tot_evlu_pfls_amt": float(output2.get("tot_evlu_pfls_amt", 0) or 0),  # 총평가손익금액
+            "tot_pftrt": float(output2.get("tot_pftrt", 0) or 0),  # 총수익률
+            # output3 필드들 (있을 경우)
+            "raw_output2": output2,
+            "raw_output3": output3,
+        }
+
     def get_trade_history(self, start_date, end_date, exchange_code="%", sll_buy_dvsn="00"):
         """
         해외주식 주문체결내역 조회 (GET /uapi/overseas-stock/v1/trading/inquire-ccnl)

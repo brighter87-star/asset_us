@@ -256,28 +256,46 @@ def show_live_status(monitor: MonitorService, prices: dict, holdings_prices: dic
     print("=" * 90)
 
     # Watchlist section - only show items where current_units < max_units
-    # Filter watchlist to only show actionable items
-    actionable_items = []
+    # Filter watchlist and calculate diff for sorting
+    watchlist_data = []
     for item in monitor.watchlist:
         ticker = item['ticker']
         max_units = item.get('max_units', 1)
         current_units = monitor.get_current_units_held(ticker)
         if current_units < max_units:
-            actionable_items.append((item, current_units, max_units))
+            target = item['target_price']
+            price_data = prices.get(ticker, {})
+            current = price_data.get('last', 0)
+            if current <= 0:
+                current = holdings_prices.get(ticker, {}).get('last', 0)
 
-    print(f"[Watchlist] ({len(actionable_items)}/{len(monitor.watchlist)} actionable)")
+            # Calculate diff_pct for sorting
+            if current > 0:
+                if ticker in positions:
+                    pos = positions[ticker]
+                    entry = pos.get('entry_price', 0)
+                    if entry > 0:
+                        diff_pct = ((current - entry) / entry) * 100
+                    else:
+                        diff_pct = 9999  # Unknown at bottom
+                else:
+                    diff_pct = ((target - current) / current) * 100
+            else:
+                diff_pct = 9999  # Loading at bottom
+
+            watchlist_data.append((item, current_units, max_units, current, diff_pct))
+
+    # Sort by diff ascending (closest to breakout first)
+    watchlist_data.sort(key=lambda x: x[4])
+
+    print(f"[Watchlist] ({len(watchlist_data)}/{len(monitor.watchlist)} actionable)")
     print(f"{'Symbol':<8} {'Target($)':>12} {'Current($)':>12} {'Diff':>10} {'Units':>8} {'Status':>10}")
     print("-" * 75)
 
-    for item, current_units, max_units in actionable_items:
+    for item, current_units, max_units, current, diff_pct in watchlist_data:
         ticker = item['ticker']
         target = item['target_price']
         units_str = f"{current_units:.1f}/{max_units}"
-
-        price_data = prices.get(ticker, {})
-        current = price_data.get('last', 0)
-        if current <= 0:
-            current = holdings_prices.get(ticker, {}).get('last', 0)
 
         if current > 0:
             if ticker in positions:
@@ -285,13 +303,12 @@ def show_live_status(monitor: MonitorService, prices: dict, holdings_prices: dic
                 entry = pos.get('entry_price', 0)
                 stop_loss = pos.get('stop_loss_price', 0)
                 if entry > 0:
-                    pnl_pct = ((current - entry) / entry) * 100
-                    diff_str = f"{pnl_pct:+.2f}%"
+                    diff_str = f"{diff_pct:+.2f}%"
                     if current <= stop_loss:
                         status_str = "<<STOP!"
-                    elif pnl_pct <= -5:
+                    elif diff_pct <= -5:
                         status_str = "WARNING"
-                    elif pnl_pct > 0:
+                    elif diff_pct > 0:
                         status_str = "HOLD ▲"
                     else:
                         status_str = "HOLD ▼"
@@ -299,7 +316,6 @@ def show_live_status(monitor: MonitorService, prices: dict, holdings_prices: dic
                     diff_str = "---"
                     status_str = "HOLD"
             else:
-                diff_pct = ((target - current) / current) * 100
                 diff_str = f"{diff_pct:+.2f}%"
                 if diff_pct <= 0:
                     status_str = "BREAKOUT!"

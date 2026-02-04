@@ -358,45 +358,71 @@ class MonitorService:
 
         return None
 
-    def get_total_assets(self) -> float:
-        """Get total portfolio value from account summary or holdings."""
-        if self._total_assets > 0:
+    def get_total_assets(self, force_refresh: bool = False) -> float:
+        """
+        Get total portfolio value (외화잔고).
+
+        외화잔고 = 외화주문가능금액 + 전체 주식평가액
+
+        This matches the "외화잔고" shown in HTS/MTS.
+        """
+        if self._total_assets > 0 and not force_refresh:
             return self._total_assets
 
-        # Try account_summary first
+        total = 0.0
+
+        # 1. Get 외화주문가능금액 from buying power API (ord_psbl_frcr_amt)
+        try:
+            import requests
+            url = f"{self.client.base_url}/uapi/overseas-stock/v1/trading/inquire-psamount"
+            headers = self.client._get_headers("TTTS3007R")
+            params = {
+                "CANO": self.client.cano,
+                "ACNT_PRDT_CD": self.client.acnt_prdt_cd,
+                "OVRS_EXCG_CD": "NASD",
+                "OVRS_ORD_UNPR": "100",
+                "ITEM_CD": "AAPL",
+            }
+            self.client._wait_for_rate_limit()
+            response = requests.get(url, headers=headers, params=params)
+            data = response.json()
+            output = data.get("output", {})
+            # ord_psbl_frcr_amt = 외화주문가능금액 (NOT ovrs_ord_psbl_amt)
+            cash = float(output.get("ord_psbl_frcr_amt", 0) or 0)
+            total += cash
+        except Exception as e:
+            print(f"[WARN] Failed to get buying power: {e}")
+
+        # 2. Get stock evaluation from holdings (all exchanges)
         try:
             from db.connection import get_connection
             conn = get_connection()
             with conn.cursor() as cur:
-                # tot_est_amt = 총평가금액 (주식+예수금)
+                # Sum of all holdings evaluation amounts (USD)
                 cur.execute("""
-                    SELECT tot_est_amt FROM account_summary
-                    ORDER BY snapshot_date DESC LIMIT 1
+                    SELECT SUM(evlt_amt) FROM holdings
+                    WHERE snapshot_date = (SELECT MAX(snapshot_date) FROM holdings)
                 """)
                 row = cur.fetchone()
                 if row and row[0]:
-                    self._total_assets = float(row[0])
+                    total += float(row[0])
             conn.close()
         except Exception as e:
-            print(f"[WARN] Failed to get total assets from account_summary: {e}")
-
-        # Fallback: sum from holdings
-        if self._total_assets <= 0:
+            print(f"[WARN] Failed to get holdings sum: {e}")
+            # Fallback: get directly from API
             try:
-                from db.connection import get_connection
-                conn = get_connection()
-                with conn.cursor() as cur:
-                    # Sum of all holdings evaluation amounts
-                    cur.execute("""
-                        SELECT SUM(evlt_amt) FROM holdings
-                        WHERE snapshot_date = (SELECT MAX(snapshot_date) FROM holdings)
-                    """)
-                    row = cur.fetchone()
-                    if row and row[0]:
-                        self._total_assets = float(row[0])
-                conn.close()
-            except Exception as e:
-                print(f"[WARN] Failed to get total assets from holdings: {e}")
+                for exc in ["NASD", "NYSE", "AMEX"]:
+                    try:
+                        holdings = self.client.get_holdings(exchange_code=exc, currency="USD")
+                        for h in holdings:
+                            total += float(h.get("ovrs_stck_evlu_amt", 0) or 0)
+                    except Exception:
+                        pass
+            except Exception:
+                pass
+
+        if total > 0:
+            self._total_assets = total
 
         return self._total_assets
 
