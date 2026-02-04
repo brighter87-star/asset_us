@@ -71,6 +71,7 @@ class MonitorService:
         self._last_triggers_hash: str = ""  # Track changes to avoid repeated logs
         self._skipped_symbols: Dict[str, float] = {}  # Track skipped symbols with timestamp (for one-time logging)
         self._today_api_buys: Optional[set] = None  # Cache today's API buy symbols
+        self._today_api_sells: Optional[set] = None  # Cache today's API sell symbols
 
         # Sync trade history on startup to ensure DB is up-to-date
         self._startup_sync()
@@ -234,11 +235,13 @@ class MonitorService:
 
     def _merge_api_buys_to_triggers(self):
         """
-        Load today's buys from KIS API and merge into daily_triggers.
+        Load today's buys and sells from KIS API and merge into daily_triggers.
         Called on startup to ensure all trades are captured even if DB sync is delayed.
         """
         try:
             api_buys = self._load_today_api_buys()
+            api_sells = self._load_today_api_sells()
+
             added = 0
             for symbol in api_buys:
                 if symbol not in self.daily_triggers:
@@ -247,13 +250,25 @@ class MonitorService:
                         "entry_time": "",
                         "entry_price": 0,
                         "trigger_count": 1,
+                        "sold": symbol in api_sells,
                     }
                     added += 1
+                elif symbol in api_sells:
+                    # Mark as sold if sell found
+                    self.daily_triggers[symbol]["sold"] = True
+
+            # Also mark any existing triggers as sold if they were sold
+            for symbol in api_sells:
+                if symbol in self.daily_triggers:
+                    self.daily_triggers[symbol]["sold"] = True
+
             if added > 0:
                 print(f"[API] Added {added} symbols from KIS API to triggers")
-                self._log_triggers_if_changed(force=True)
+            if api_sells:
+                print(f"[API] Sells detected: {sorted(api_sells)}")
+            self._log_triggers_if_changed(force=True)
         except Exception as e:
-            print(f"[WARN] Failed to merge API buys: {e}")
+            print(f"[WARN] Failed to merge API trades: {e}")
 
     def _load_today_api_buys(self) -> set:
         """
@@ -298,6 +313,47 @@ class MonitorService:
             self._today_api_buys = set()
 
         return self._today_api_buys
+
+    def _load_today_api_sells(self) -> set:
+        """
+        Load today's sell orders directly from KIS API.
+        Used to detect manual stop-loss sells.
+        Cached to avoid repeated API calls within same session.
+        """
+        if self._today_api_sells is not None:
+            return self._today_api_sells
+
+        from datetime import timedelta
+        today_et = self._get_today_et()
+        yesterday_et = today_et - timedelta(days=1)
+
+        # Query last 2 days to catch overnight trades
+        start_str = yesterday_et.strftime("%Y%m%d")
+        end_str = today_et.strftime("%Y%m%d")
+        sold_symbols = set()
+
+        try:
+            # sll_buy_dvsn: 01 = 매도만
+            trades = self.client.get_trade_history(
+                start_date=start_str,
+                end_date=end_str,
+                exchange_code="%",
+                sll_buy_dvsn="01",  # 매도만
+            )
+            for trade in trades:
+                symbol = trade.get("pdno", "").strip()
+                if symbol:
+                    sold_symbols.add(symbol)
+
+            if sold_symbols:
+                print(f"[API] Recent sells from KIS API ({start_str}~{end_str}): {sorted(sold_symbols)}")
+
+            self._today_api_sells = sold_symbols
+        except Exception as e:
+            print(f"[WARN] Failed to get sells from API: {e}")
+            self._today_api_sells = set()
+
+        return self._today_api_sells
 
     def has_today_api_buy(self, symbol: str) -> bool:
         """
