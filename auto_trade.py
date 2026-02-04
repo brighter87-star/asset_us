@@ -50,6 +50,42 @@ def load_holdings_prices_from_db() -> dict:
     return prices
 
 
+def get_market_session() -> str:
+    """
+    Determine current US market session.
+    Returns: 'PRE', 'REGULAR', 'AFTER', or 'CLOSED'
+
+    US Market Hours (ET):
+    - Pre-market: 4:00 AM - 9:30 AM ET
+    - Regular: 9:30 AM - 4:00 PM ET
+    - After-market: 4:00 PM - 8:00 PM ET
+    """
+    from datetime import time
+    from zoneinfo import ZoneInfo
+
+    ET = ZoneInfo("America/New_York")
+    now_et = datetime.now(ET)
+    current_time = now_et.time()
+
+    # Weekend = closed
+    if now_et.weekday() >= 5:
+        return "CLOSED"
+
+    pre_start = time(4, 0)
+    regular_start = time(9, 30)
+    regular_end = time(16, 0)
+    after_end = time(20, 0)
+
+    if pre_start <= current_time < regular_start:
+        return "PRE"
+    elif regular_start <= current_time < regular_end:
+        return "REGULAR"
+    elif regular_end <= current_time < after_end:
+        return "AFTER"
+    else:
+        return "CLOSED"
+
+
 def print_banner():
     """Print startup banner."""
     print("=" * 70)
@@ -127,17 +163,22 @@ def show_status():
 
     print_settings(monitor)
 
+    # Market session
+    session = get_market_session()
+    session_labels = {"PRE": "Pre-Market", "REGULAR": "Regular", "AFTER": "After-Hours", "CLOSED": "Closed"}
+    print(f"  Session: {session_labels[session]}")
+
     # Watchlist
     print(f"\n[Watchlist] ({status['watchlist_count']} items)")
     print("-" * 60)
-    print(f"{'Symbol':<8} {'Target':>12} {'SL%':>8}")
+    print(f"{'Symbol':<8} {'Target($)':>12} {'SL%':>8}")
     print("-" * 60)
 
     for item in monitor.watchlist:
         symbol = item['ticker']
         target = item['target_price']
         sl = item.get('stop_loss_pct') or monitor.trading_settings.STOP_LOSS_PCT
-        print(f"{symbol:<8} ${target:>10,.2f} {sl:>7.1f}%")
+        print(f"{symbol:<8} {target:>12,.2f} {sl:>7.1f}%")
 
     print("-" * 60)
 
@@ -147,7 +188,7 @@ def show_status():
 
     if positions:
         print("-" * 80)
-        print(f"{'Symbol':<8} {'Qty':>6} {'Entry':>12} {'Current':>12} {'P&L':>10}")
+        print(f"{'Symbol':<8} {'Qty':>6} {'Entry($)':>12} {'Current($)':>12} {'P/L%':>10} {'Stop($)':>12}")
         print("-" * 80)
 
         holdings_prices = load_holdings_prices_from_db()
@@ -156,14 +197,15 @@ def show_status():
             symbol = pos['symbol']
             qty = pos['quantity']
             entry = pos['entry_price']
+            stop_loss = pos.get('stop_loss_price', 0)
             current = pos.get('current_price', 0) or holdings_prices.get(symbol, {}).get('last', 0)
 
             if current > 0 and entry > 0:
                 pnl_pct = ((current - entry) / entry) * 100
                 pnl_str = f"{pnl_pct:+.2f}%"
-                print(f"{symbol:<8} {qty:>6} ${entry:>10,.2f} ${current:>10,.2f} {pnl_str:>10}")
+                print(f"{symbol:<8} {qty:>6} {entry:>12,.2f} {current:>12,.2f} {pnl_str:>10} {stop_loss:>12,.2f}")
             else:
-                print(f"{symbol:<8} {qty:>6} ${entry:>10,.2f} {'---':>12} {'---':>10}")
+                print(f"{symbol:<8} {qty:>6} {entry:>12,.2f} {'---':>12} {'---':>10} {stop_loss:>12,.2f}")
 
         print("-" * 80)
     else:
@@ -173,7 +215,7 @@ def show_status():
 
 
 def show_live_status(monitor: MonitorService, prices: dict, holdings_prices: dict = None, clear: bool = True):
-    """Display live status with real-time prices (watchlist only)."""
+    """Display live status with real-time prices."""
     import os
     now = datetime.now()
 
@@ -184,37 +226,44 @@ def show_live_status(monitor: MonitorService, prices: dict, holdings_prices: dic
     if clear:
         os.system('cls' if os.name == 'nt' else 'clear')
 
-    # 보유 종목 정보 (평가손익 표시용)
+    # Get market session
+    session = get_market_session()
+    session_labels = {
+        "PRE": "Pre-Market",
+        "REGULAR": "Regular Hours",
+        "AFTER": "After-Hours",
+        "CLOSED": "Market Closed"
+    }
+
+    # 보유 종목 정보
     positions = {pos['symbol']: pos for pos in monitor.order_service.get_open_positions()}
 
     # Header
-    print(f"[{now.strftime('%H:%M:%S.%f')[:12]}] Live Monitoring (US Stocks)")
-    print("=" * 85)
+    print(f"[{now.strftime('%H:%M:%S.%f')[:12]}] Live Monitoring (US Stocks) [{session_labels[session]}]")
+    print("=" * 90)
 
-    # Watchlist section
+    # Watchlist section ($ in label only)
     print("[Watchlist]")
-    print(f"{'Symbol':<8} {'Target':>12} {'Current':>12} {'Diff':>12} {'Status':>10}")
-    print("-" * 60)
+    print(f"{'Symbol':<8} {'Target($)':>12} {'Current($)':>12} {'Diff':>10} {'Status':>10}")
+    print("-" * 65)
 
     for item in monitor.watchlist:
         ticker = item['ticker']
         target = item['target_price']
 
-        # poller에서 먼저, 없으면 holdings에서 fallback
         price_data = prices.get(ticker, {})
         current = price_data.get('last', 0)
         if current <= 0:
             current = holdings_prices.get(ticker, {}).get('last', 0)
 
         if current > 0:
-            # 보유 종목이면 평가손익률 표시
             if ticker in positions:
                 pos = positions[ticker]
                 entry = pos.get('entry_price', 0)
                 stop_loss = pos.get('stop_loss_price', 0)
                 if entry > 0:
                     pnl_pct = ((current - entry) / entry) * 100
-                    pnl_str = f"{pnl_pct:+.2f}%"
+                    diff_str = f"{pnl_pct:+.2f}%"
                     if current <= stop_loss:
                         status_str = "<<STOP!"
                     elif pnl_pct <= -5:
@@ -224,12 +273,11 @@ def show_live_status(monitor: MonitorService, prices: dict, holdings_prices: dic
                     else:
                         status_str = "HOLD ▼"
                 else:
-                    pnl_str = "---"
+                    diff_str = "---"
                     status_str = "HOLD"
             else:
-                # 미보유: 기준가 대비 차이
                 diff_pct = ((target - current) / current) * 100
-                pnl_str = f"{diff_pct:+.2f}%"
+                diff_str = f"{diff_pct:+.2f}%"
                 if diff_pct <= 0:
                     status_str = "BREAKOUT!"
                 elif diff_pct <= 1:
@@ -237,30 +285,65 @@ def show_live_status(monitor: MonitorService, prices: dict, holdings_prices: dic
                 else:
                     status_str = "WAIT"
 
-            print(f"{ticker:<8} ${target:>10,.2f} ${current:>10,.2f} {pnl_str:>12} {status_str:>10}")
+            print(f"{ticker:<8} {target:>12,.2f} {current:>12,.2f} {diff_str:>10} {status_str:>10}")
         else:
-            print(f"{ticker:<8} ${target:>10,.2f} {'---':>12} {'---':>12} {'LOADING':>10}")
+            print(f"{ticker:<8} {target:>12,.2f} {'---':>12} {'---':>10} {'LOADING':>10}")
 
-    print("-" * 60)
+    print("-" * 65)
 
-    # Bot Trades Today section (only shows stocks traded by the bot, not manual trades)
+    # Holdings Stop Loss Monitor section
+    if positions:
+        stop_loss_pct = monitor.trading_settings.STOP_LOSS_PCT
+        print(f"\n[Holdings Stop Loss Monitor]")
+        print(f"{'CODE':<8} {'NAME':<12} {'ENTRY($)':>12} {'CURRENT($)':>12} {'P/L%':>10} {'STOP($)':>12} {'STATUS':>8}")
+        print("-" * 90)
+
+        for symbol, pos in positions.items():
+            entry = pos.get('entry_price', 0)
+            stop_loss = pos.get('stop_loss_price', 0)
+            qty = pos.get('quantity', 0)
+
+            price_data = prices.get(symbol, {})
+            current = price_data.get('last', 0)
+            if current <= 0:
+                current = holdings_prices.get(symbol, {}).get('last', 0)
+
+            # 종목명 (watchlist에서 찾기)
+            watchlist_item = next((w for w in monitor.watchlist if w['ticker'] == symbol), None)
+            name = symbol  # 미국주식은 티커로 표시
+
+            if current > 0 and entry > 0:
+                pnl_pct = ((current - entry) / entry) * 100
+                pnl_str = f"{pnl_pct:+.1f}%"
+
+                if current <= stop_loss:
+                    status = "STOP!"
+                elif pnl_pct <= -stop_loss_pct * 0.7:
+                    status = "WARN"
+                else:
+                    status = "OK"
+
+                print(f"{symbol:<8} {name:<12} {entry:>12,.2f} {current:>12,.2f} {pnl_str:>10} {stop_loss:>12,.2f} {status:>8}")
+            else:
+                print(f"{symbol:<8} {name:<12} {entry:>12,.2f} {'---':>12} {'---':>10} {stop_loss:>12,.2f} {'---':>8}")
+
+        print("-" * 90)
+
+    # Bot Trades Today section
     bot_triggers = monitor.daily_triggers
     if bot_triggers:
-        print("\n[Bot Trades Today] (auto-executed only, excludes manual trades)")
-        print(f"{'Symbol':<8} {'Target':>10} {'Entry':>10} {'Current':>10} {'Return':>10} {'Status':>12}")
-        print("-" * 70)
+        print(f"\n[Bot Trades Today] (auto-executed only)")
+        print(f"{'Symbol':<8} {'Target($)':>10} {'Entry($)':>10} {'Current($)':>12} {'Return':>10} {'Status':>12}")
+        print("-" * 75)
 
         stop_loss_pct = monitor.trading_settings.STOP_LOSS_PCT
 
         for symbol, trigger_info in bot_triggers.items():
             entry_price = trigger_info.get('entry_price', 0)
-            entry_type = trigger_info.get('entry_type', 'breakout')
 
-            # Get target from watchlist
             watchlist_item = next((w for w in monitor.watchlist if w['ticker'] == symbol), None)
             target = watchlist_item['target_price'] if watchlist_item else entry_price
 
-            # Get current price
             price_data = prices.get(symbol, {})
             current = price_data.get('last', 0)
             if current <= 0:
@@ -270,7 +353,6 @@ def show_live_status(monitor: MonitorService, prices: dict, holdings_prices: dic
                 return_pct = ((current - entry_price) / entry_price) * 100
                 return_str = f"{return_pct:+.2f}%"
 
-                # Determine status
                 if return_pct <= -stop_loss_pct:
                     status = "STOP LOSS"
                 elif return_pct < 0:
@@ -278,15 +360,15 @@ def show_live_status(monitor: MonitorService, prices: dict, holdings_prices: dic
                 else:
                     status = "HOLDING +"
 
-                print(f"{symbol:<8} ${target:>8,.2f} ${entry_price:>8,.2f} ${current:>8,.2f} {return_str:>10} {status:>12}")
+                print(f"{symbol:<8} {target:>10,.2f} {entry_price:>10,.2f} {current:>12,.2f} {return_str:>10} {status:>12}")
             else:
-                print(f"{symbol:<8} ${target:>8,.2f} ${entry_price:>8,.2f} {'---':>10} {'---':>10} {'LOADING':>12}")
+                print(f"{symbol:<8} {target:>10,.2f} {entry_price:>10,.2f} {'---':>12} {'---':>10} {'LOADING':>12}")
 
-        print("-" * 70)
+        print("-" * 75)
     else:
         print("\n[Bot Trades Today] No auto-executed trades yet")
 
-    print("=" * 85)
+    print("=" * 90)
 
 
 def run_trading_loop():
