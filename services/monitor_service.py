@@ -114,27 +114,35 @@ class MonitorService:
             print(f"[WARN] Failed to load from JSON: {e}")
 
     def _load_today_trades_from_db(self, today_et: date):
-        """Load today's trades from database and merge with existing triggers."""
+        """Load today's trades from database and merge with existing triggers.
+
+        Note: Queries last 2 days to catch overnight trades
+        (e.g., if it's Feb 5 01:00 ET, Feb 4 market trades have trade_date=2026-02-04)
+        """
         try:
+            from datetime import timedelta
             from db.connection import get_connection
+
+            yesterday_et = today_et - timedelta(days=1)
+
             conn = get_connection()
             with conn.cursor() as cur:
-                # Get today's buy trades (매수)
+                # Get last 2 days buy trades (매수)
                 cur.execute("""
                     SELECT stk_cd, cntr_uv, ord_tm
                     FROM account_trade_history
-                    WHERE trade_date = %s AND io_tp_nm LIKE '%%매수%%'
+                    WHERE trade_date >= %s AND io_tp_nm LIKE '%%매수%%'
                     ORDER BY ord_tm
-                """, (today_et,))
+                """, (yesterday_et,))
                 buys = cur.fetchall()
 
-                # Get today's sell trades (매도) - for stop loss detection
+                # Get last 2 days sell trades (매도) - for stop loss detection
                 cur.execute("""
                     SELECT stk_cd, cntr_uv, ord_tm
                     FROM account_trade_history
-                    WHERE trade_date = %s AND io_tp_nm LIKE '%%매도%%'
+                    WHERE trade_date >= %s AND io_tp_nm LIKE '%%매도%%'
                     ORDER BY ord_tm
-                """, (today_et,))
+                """, (yesterday_et,))
                 sells = cur.fetchall()
             conn.close()
 
@@ -232,19 +240,27 @@ class MonitorService:
         Load today's buy orders directly from KIS API.
         Most reliable source - doesn't depend on DB sync.
         Cached to avoid repeated API calls within same session.
+
+        Note: Queries last 2 days to catch trades from overnight session
+        (e.g., if it's Feb 5 01:00 ET, Feb 4 market trades have ord_dt=20260204)
         """
         if self._today_api_buys is not None:
             return self._today_api_buys
 
+        from datetime import timedelta
         today_et = self._get_today_et()
-        today_str = today_et.strftime("%Y%m%d")
+        yesterday_et = today_et - timedelta(days=1)
+
+        # Query last 2 days to catch overnight trades
+        start_str = yesterday_et.strftime("%Y%m%d")
+        end_str = today_et.strftime("%Y%m%d")
         bought_symbols = set()
 
         try:
             # sll_buy_dvsn: 02 = 매수만
             trades = self.client.get_trade_history(
-                start_date=today_str,
-                end_date=today_str,
+                start_date=start_str,
+                end_date=end_str,
                 exchange_code="%",
                 sll_buy_dvsn="02",  # 매수만
             )
@@ -254,11 +270,11 @@ class MonitorService:
                     bought_symbols.add(symbol)
 
             if bought_symbols:
-                print(f"[API] Today's buys from KIS API: {sorted(bought_symbols)}")
+                print(f"[API] Recent buys from KIS API ({start_str}~{end_str}): {sorted(bought_symbols)}")
 
             self._today_api_buys = bought_symbols
         except Exception as e:
-            print(f"[WARN] Failed to get today's buys from API: {e}")
+            print(f"[WARN] Failed to get buys from API: {e}")
             self._today_api_buys = set()
 
         return self._today_api_buys
