@@ -217,10 +217,16 @@ class MonitorService:
                 """, (symbol, today_et))
                 count = cur.fetchone()[0]
             conn.close()
+            if count > 0:
+                print(f"[SAFETY] {symbol} already bought today (DB: {count} trades on {today_et})")
             return count > 0
         except Exception as e:
+            print(f"[SAFETY] DB check failed for {symbol}: {e}, checking daily_triggers")
             # On error, check daily_triggers as fallback
-            return symbol in self.daily_triggers
+            has_trigger = symbol in self.daily_triggers
+            if has_trigger:
+                print(f"[SAFETY] {symbol} found in daily_triggers")
+            return has_trigger
 
     def _save_daily_triggers(self):
         """Save daily triggers to file (US ET date)."""
@@ -651,10 +657,12 @@ class MonitorService:
 
         # Max 1 trigger per day per symbol (to avoid rapid-fire buying on volatile days)
         if today_triggers >= 1:
+            print(f"[{symbol}] Skipping: already triggered today (trigger_count={today_triggers})")
             return False
 
         # Safety check: directly query DB to prevent double-buy on bot restart
         if self.has_today_db_buy(symbol):
+            print(f"[{symbol}] Skipping: DB shows today's buy")
             return False
 
         # Get current price
