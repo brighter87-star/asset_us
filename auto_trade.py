@@ -405,7 +405,7 @@ def show_live_status(monitor: MonitorService, prices: dict, holdings_prices: dic
                 if is_sold:
                     status = "SOLD"
                 elif return_pct <= -stop_loss_pct:
-                    status = "STOP LOSS"
+                    status = "STOP HIT!"  # At stop loss threshold but not yet sold
                 elif return_pct < 0:
                     status = "HOLDING -"
                 else:
