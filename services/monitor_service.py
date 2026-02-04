@@ -75,13 +75,41 @@ class MonitorService:
         return datetime.now(ET).date()
 
     def _load_daily_triggers(self):
-        """Load daily triggers from database (US ET date). DB is source of truth."""
+        """
+        Load daily triggers from both DB and JSON file.
+        - DB: source of truth for completed/synced trades
+        - JSON: backup for very recent trades (API sync delay)
+        """
         today_et = self._get_today_et()
         self.daily_triggers = {}
+
+        # 1. Load from JSON file first (catches recent trades not yet in DB)
+        self._load_triggers_from_json(today_et)
+
+        # 2. Load from DB (source of truth, will add any missing)
         self._load_today_trades_from_db(today_et)
 
+    def _load_triggers_from_json(self, today_et: date):
+        """Load triggers from JSON file (backup for API sync delay)."""
+        try:
+            if DAILY_TRIGGERS_FILE.exists():
+                with open(DAILY_TRIGGERS_FILE, "r", encoding="utf-8") as f:
+                    data = json.load(f)
+
+                # Only load if same date (US ET)
+                saved_date = data.get("date")
+                if saved_date == str(today_et):
+                    json_triggers = data.get("triggers", {})
+                    for symbol, info in json_triggers.items():
+                        if symbol not in self.daily_triggers:
+                            self.daily_triggers[symbol] = info
+                    if json_triggers:
+                        print(f"[TRIGGERS] Loaded {len(json_triggers)} from JSON backup")
+        except Exception as e:
+            print(f"[WARN] Failed to load from JSON: {e}")
+
     def _load_today_trades_from_db(self, today_et: date):
-        """Load today's trades from database. DB is the source of truth."""
+        """Load today's trades from database and merge with existing triggers."""
         try:
             from db.connection import get_connection
             conn = get_connection()
@@ -108,28 +136,46 @@ class MonitorService:
             # Track sold symbols
             sold_symbols = set(row[0] for row in sells)
 
-            # Load all trades from DB
+            # Count DB trades per symbol
+            db_trade_counts = {}
             for stk_cd, cntr_uv, ord_tm in buys:
-                if stk_cd not in self.daily_triggers:
-                    self.daily_triggers[stk_cd] = {
-                        "entry_type": "db",
-                        "entry_time": str(ord_tm) if ord_tm else "",
+                if stk_cd not in db_trade_counts:
+                    db_trade_counts[stk_cd] = {
+                        "count": 1,
                         "entry_price": float(cntr_uv) if cntr_uv else 0,
-                        "trigger_count": 1,
-                        "sold": stk_cd in sold_symbols,
+                        "entry_time": str(ord_tm) if ord_tm else "",
                     }
                 else:
-                    # Increment trigger count for multiple buys of same stock
-                    self.daily_triggers[stk_cd]["trigger_count"] += 1
+                    db_trade_counts[stk_cd]["count"] += 1
+
+            # Merge DB trades with existing triggers (from JSON)
+            db_added = 0
+            for stk_cd, info in db_trade_counts.items():
+                if stk_cd not in self.daily_triggers:
+                    # New from DB
+                    self.daily_triggers[stk_cd] = {
+                        "entry_type": "db",
+                        "entry_time": info["entry_time"],
+                        "entry_price": info["entry_price"],
+                        "trigger_count": info["count"],
+                        "sold": stk_cd in sold_symbols,
+                    }
+                    db_added += 1
+                else:
+                    # Already exists (from JSON), update trigger_count to max
+                    existing_count = self.daily_triggers[stk_cd].get("trigger_count", 1)
+                    self.daily_triggers[stk_cd]["trigger_count"] = max(existing_count, info["count"])
 
             # Mark sold symbols
             for symbol in sold_symbols:
                 if symbol in self.daily_triggers:
                     self.daily_triggers[symbol]["sold"] = True
 
+            if db_added > 0:
+                print(f"[TRIGGERS] Added {db_added} from DB")
             if self.daily_triggers:
                 symbols = list(self.daily_triggers.keys())
-                print(f"[TRIGGERS] Loaded {len(symbols)} trades from DB: {symbols}")
+                print(f"[TRIGGERS] Total: {len(symbols)} triggers: {symbols}")
             if sold_symbols:
                 print(f"[TRIGGERS] Sold today: {sold_symbols}")
 
