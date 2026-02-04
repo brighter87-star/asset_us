@@ -163,8 +163,11 @@ class KISAPIClient:
         all_holdings = []
         ctx_area_fk200 = ""
         ctx_area_nk200 = ""
+        max_pages = 10  # Safety limit to prevent infinite loop
+        page = 0
 
-        while True:
+        while page < max_pages:
+            page += 1
             headers = self._get_headers(tr_id)
 
             params = {
@@ -203,6 +206,9 @@ class KISAPIClient:
 
             if not ctx_area_fk200 and not ctx_area_nk200:
                 break
+
+        if page >= max_pages:
+            print(f"[WARN] Holdings pagination hit max pages ({max_pages})")
 
         return all_holdings
 
@@ -290,8 +296,11 @@ class KISAPIClient:
         all_trades = []
         ctx_area_fk200 = ""
         ctx_area_nk200 = ""
+        max_pages = 20  # Safety limit to prevent infinite loop
+        page = 0
 
-        while True:
+        while page < max_pages:
+            page += 1
             headers = self._get_headers(tr_id)
 
             params = {
@@ -337,6 +346,9 @@ class KISAPIClient:
 
             if not ctx_area_fk200 and not ctx_area_nk200:
                 break
+
+        if page >= max_pages:
+            print(f"[WARN] Trade history pagination hit max pages ({max_pages})")
 
         return all_trades
 
