@@ -545,22 +545,37 @@ class MonitorService:
             return set()
 
     def _sync_trade_history_before_close(self):
-        """Sync trade history from API before close logic (catch manual buys)."""
+        """Sync trade history and holdings from API before close logic (catch manual buys)."""
         if hasattr(self, '_close_synced') and self._close_synced:
             return  # Already synced today
 
         try:
             from db.connection import get_connection
-            from services.data_sync_service import sync_trade_history_from_kis
+            from services.data_sync_service import sync_trade_history_from_kis, sync_holdings_from_kis
 
-            print("[CLOSE] Syncing trade history before close logic...")
             conn = get_connection()
-            synced = sync_trade_history_from_kis(conn)
+
+            # 1. Sync trade history (for today_bought detection)
+            print("[CLOSE] Syncing trade history...")
+            trade_count = sync_trade_history_from_kis(conn)
+            print(f"[CLOSE] Synced {trade_count} trades")
+
+            # 2. Sync holdings (for current positions)
+            print("[CLOSE] Syncing holdings...")
+            holdings_count = sync_holdings_from_kis(conn)
+            print(f"[CLOSE] Synced {holdings_count} holdings")
+
             conn.close()
-            print(f"[CLOSE] Synced {synced} trades")
+
+            # 3. Refresh positions from holdings DB (includes manual buys)
+            print("[CLOSE] Refreshing positions from holdings...")
+            self.order_service.sync_positions_from_db(
+                stop_loss_pct=self.trading_settings.STOP_LOSS_PCT
+            )
+
             self._close_synced = True
         except Exception as e:
-            print(f"[WARN] Failed to sync trade history: {e}")
+            print(f"[WARN] Failed to sync before close: {e}")
 
     def execute_close_logic(self) -> Dict[str, str]:
         """
