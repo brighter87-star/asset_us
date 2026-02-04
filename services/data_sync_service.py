@@ -75,6 +75,7 @@ def sync_holdings_from_kis(
             # 일부 거래소에서 잔고가 없을 수 있음
             if "no data" not in str(e).lower():
                 print(f"  Warning: {exchange_code} holdings fetch failed: {e}")
+            # no data는 정상 (해당 거래소에 잔고 없음)
 
     if not all_holdings:
         print("  No holdings found")
@@ -185,6 +186,8 @@ def sync_trade_history_from_kis(
         except Exception as e:
             if "no data" not in str(e).lower():
                 print(f"  Warning: {exchange_code} trade history fetch failed: {e}")
+            else:
+                print(f"  {exchange_code}: no trades found")
 
     if not all_trades:
         print("  No trades found")

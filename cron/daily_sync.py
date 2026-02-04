@@ -4,10 +4,16 @@ Daily synchronization script for US stock asset management system.
 Syncs all data from Korea Investment Securities API to database.
 
 This script is idempotent - safe to run multiple times.
-Designed to be run by cron after US market close (4:00 PM ET = ~6:00 AM KST).
+
+IMPORTANT: Dates use US Eastern time (not Korean time) because
+KIS API returns trade dates in US local time (현지시각 기준).
+
+Recommended cron schedule (using US Eastern time to auto-handle DST):
+    # 20:00 ET Mon-Fri (after after-market close)
+    0 20 * * 1-5 TZ=America/New_York cd /path/to/asset_us && python cron/daily_sync.py
 
 Usage:
-    python cron/daily_sync.py              # Sync today's data
+    python cron/daily_sync.py              # Sync today's data (US ET)
     python cron/daily_sync.py --date 2026-02-04  # Sync specific date
 """
 
@@ -15,6 +21,10 @@ import argparse
 import sys
 from datetime import date, datetime
 from pathlib import Path
+from zoneinfo import ZoneInfo
+
+# US Eastern timezone (KIS API uses US local time for dates)
+ET = ZoneInfo("America/New_York")
 
 # Add project root to path
 PROJECT_ROOT = Path(__file__).parent.parent
@@ -36,14 +46,17 @@ def daily_sync(target_date: date = None):
     Run daily synchronization for all data.
 
     Args:
-        target_date: Date to sync. If None, uses today.
+        target_date: Date to sync. If None, uses US Eastern time today.
+                     (KIS API uses US local time for trade dates)
     """
     if target_date is None:
-        target_date = date.today()
+        # Use US Eastern time - KIS API returns dates in US local time
+        target_date = datetime.now(ET).date()
 
     print("=" * 80)
     print(f"Daily Sync (US Stocks) - {target_date}")
-    print(f"Started at: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
+    print(f"Started at: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')} KST")
+    print(f"           {datetime.now(ET).strftime('%Y-%m-%d %H:%M:%S')} ET")
     print("=" * 80)
 
     conn = get_connection()
