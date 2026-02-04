@@ -12,6 +12,13 @@ import sys
 import time
 from datetime import datetime
 
+# Windows keyboard input (non-blocking)
+try:
+    import msvcrt
+    HAS_MSVCRT = True
+except ImportError:
+    HAS_MSVCRT = False
+
 from db.connection import get_connection
 from services.kis_service import KISAPIClient
 from services.data_sync_service import sync_holdings_from_kis
@@ -503,6 +510,8 @@ def run_trading_loop():
 
     print("\n" + "=" * 70)
     print("Starting trading loop... (Ctrl+C to stop)")
+    if HAS_MSVCRT:
+        print("  Press 'r' to manually refresh holdings")
     print("=" * 70)
 
     trade_logger.log_system_event("START", f"watchlist={len(monitor.watchlist)} items")
@@ -519,6 +528,17 @@ def run_trading_loop():
             now = datetime.now()
             today = now.date()
             current_time = time.time()
+
+            # Check for keyboard input (non-blocking)
+            if HAS_MSVCRT and msvcrt.kbhit():
+                key = msvcrt.getch().decode('utf-8', errors='ignore').lower()
+                if key == 'r':
+                    print("\n[MANUAL] Refreshing holdings...")
+                    monitor.refresh_holdings()
+                    # Also refresh API caches
+                    monitor._today_api_buys = None
+                    monitor._today_api_sells = None
+                    print("[MANUAL] Refresh complete. Press any key to continue...")
 
             # Reset daily triggers on new day
             if last_date != today:

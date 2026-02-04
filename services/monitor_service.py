@@ -76,9 +76,12 @@ class MonitorService:
         self._skipped_symbols: Dict[str, float] = {}  # Track skipped symbols with timestamp (for one-time logging)
         self._today_api_buys: Optional[set] = None  # Cache today's API buy symbols
         self._today_api_sells: Optional[set] = None  # Cache today's API sell symbols
+        self._last_holdings_refresh: float = 0  # Timestamp of last holdings refresh
+        self._holdings_refresh_interval: int = 300  # Refresh every 5 minutes (300 seconds)
 
         # Sync trade history on startup to ensure DB is up-to-date
         self._startup_sync()
+        self._last_holdings_refresh = time.time()  # Mark startup as first refresh
 
         self._load_daily_triggers(verbose=True)  # Load persisted bot trades
         self._merge_api_buys_to_triggers()  # Also load from KIS API directly
@@ -985,7 +988,7 @@ class MonitorService:
     def _quick_sync_after_trade(self):
         """
         Quick sync after a trade - runs in background thread to avoid blocking.
-        Only syncs trade history (lightweight). Full sync happens via cron.
+        Syncs trade history immediately, then holdings after 30 seconds.
         """
         import threading
 
@@ -1008,10 +1011,47 @@ class MonitorService:
             except Exception as e:
                 print(f"[WARN] Quick sync failed: {e}")
 
-        # Run in background thread
+        # Run trade history sync in background thread
         thread = threading.Thread(target=_sync_worker, daemon=True)
         thread.start()
         print("[SYNC] Started background sync...")
+
+        # Schedule holdings refresh after 30 seconds
+        def _delayed_holdings_refresh():
+            try:
+                print("[SYNC] Refreshing holdings (30s after trade)...")
+                self.refresh_holdings()
+                self._last_holdings_refresh = time.time()
+            except Exception as e:
+                print(f"[WARN] Delayed holdings refresh failed: {e}")
+
+        timer = threading.Timer(30.0, _delayed_holdings_refresh)
+        timer.daemon = True
+        timer.start()
+
+    def refresh_holdings(self):
+        """
+        Refresh holdings from KIS API (lightweight, today only).
+        Call this periodically to keep holdings data fresh after manual sells.
+        """
+        try:
+            from datetime import date
+            from db.connection import get_connection
+            from services.data_sync_service import sync_holdings_from_kis
+
+            conn = get_connection()
+            try:
+                today = date.today()
+                holdings_count = sync_holdings_from_kis(conn, snapshot_date=today)
+                print(f"[REFRESH] Holdings updated: {holdings_count} records")
+                # Invalidate cache
+                self._total_assets = 0
+                return holdings_count
+            finally:
+                conn.close()
+        except Exception as e:
+            print(f"[WARN] Holdings refresh failed: {e}")
+            return 0
 
     def check_and_execute_stop_loss(self) -> List[str]:
         """
