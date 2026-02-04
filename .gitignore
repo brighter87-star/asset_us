@@ -25,6 +25,11 @@ logs/
 
 # Runtime files
 .positions.json
+.daily_triggers.json
+
+# User config (not tracked)
+watchlist.csv
+settings.csv
 
 # OS
 .DS_Store
