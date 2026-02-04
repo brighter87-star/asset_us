@@ -212,6 +212,31 @@ class KISAPIClient:
 
         return all_holdings
 
+    def get_sellable_quantity(self, symbol: str) -> int:
+        """
+        특정 종목의 매도가능수량 조회.
+        3개 거래소(NASD, NYSE, AMEX)에서 검색.
+
+        Args:
+            symbol: 종목코드
+
+        Returns:
+            int: 매도가능수량 (없으면 0)
+        """
+        exchanges = ["NASD", "NYSE", "AMEX"]
+        for exchange in exchanges:
+            try:
+                holdings = self.get_holdings(exchange_code=exchange)
+                for h in holdings:
+                    if h.get("ovrs_pdno") == symbol:
+                        # ovrs_cblc_qty: 해외체결기준수량 (실제 보유수량)
+                        qty = int(h.get("ovrs_cblc_qty", 0) or 0)
+                        return qty
+            except Exception as e:
+                print(f"[WARN] Failed to check holdings on {exchange}: {e}")
+                continue
+        return 0
+
     def get_account_balance(self, exchange_code="NASD", currency="USD"):
         """
         해외주식 계좌잔고 조회 (외화잔고 포함)

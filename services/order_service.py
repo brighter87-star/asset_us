@@ -362,6 +362,18 @@ class OrderService:
             print(f"[{symbol}] No shares to sell")
             return None
 
+        # Check actual sellable quantity from API
+        try:
+            sellable_qty = self.client.get_sellable_quantity(symbol)
+            if sellable_qty <= 0:
+                print(f"[{symbol}] No sellable shares in account (API returned 0)")
+                return None
+            if sellable_qty < quantity:
+                print(f"[{symbol}] Adjusting quantity: {quantity} -> {sellable_qty} (API available)")
+                quantity = sellable_qty
+        except Exception as e:
+            print(f"[{symbol}] Could not verify sellable qty, using position qty: {e}")
+
         # Try with increasing buffer: -0.5% -> -1.0%
         buffer_levels = [0.5, 1.0]
 
