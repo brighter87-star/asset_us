@@ -206,3 +206,134 @@ def get_position_summary(
         result["total_return_pct"] = float(return_pct)
 
         return result
+
+
+def create_daily_portfolio_snapshot(
+    conn: pymysql.connections.Connection,
+    snapshot_date: Optional[date] = None,
+) -> bool:
+    """
+    Create a daily portfolio summary snapshot for TWR/MWR calculations.
+
+    This creates a single row per day summarizing the entire portfolio.
+
+    Args:
+        conn: Database connection
+        snapshot_date: Date for the snapshot. If None, uses today.
+
+    Returns:
+        True if snapshot was created, False otherwise
+    """
+    if snapshot_date is None:
+        snapshot_date = date.today()
+
+    # Get total portfolio value from account_summary
+    with conn.cursor(pymysql.cursors.DictCursor) as cur:
+        cur.execute(
+            """
+            SELECT aset_evlt_amt, tot_est_amt, invt_bsamt
+            FROM account_summary
+            WHERE snapshot_date = %s
+            """,
+            (snapshot_date,),
+        )
+        summary = cur.fetchone()
+
+    if not summary:
+        # Fallback: calculate from holdings
+        with conn.cursor(pymysql.cursors.DictCursor) as cur:
+            cur.execute(
+                """
+                SELECT
+                    COALESCE(SUM(evlt_amt), 0) as stock_value,
+                    COALESCE(SUM(pur_amt), 0) as total_cost,
+                    COALESCE(SUM(pl_amt), 0) as unrealized_pnl
+                FROM holdings
+                WHERE snapshot_date = %s
+                """,
+                (snapshot_date,),
+            )
+            holdings_summary = cur.fetchone()
+
+        stock_value = Decimal(str(holdings_summary["stock_value"])) if holdings_summary else Decimal(0)
+        total_cost = Decimal(str(holdings_summary["total_cost"])) if holdings_summary else Decimal(0)
+        unrealized_pnl = Decimal(str(holdings_summary["unrealized_pnl"])) if holdings_summary else Decimal(0)
+        total_asset = stock_value  # No cash info from holdings alone
+    else:
+        total_asset = Decimal(str(summary.get("tot_est_amt") or summary.get("aset_evlt_amt") or 0))
+        stock_value = Decimal(str(summary.get("aset_evlt_amt") or 0))
+        total_cost = Decimal(str(summary.get("invt_bsamt") or 0))
+        unrealized_pnl = stock_value - total_cost
+
+    if total_asset == 0 and stock_value == 0:
+        print(f"Warning: No portfolio value found for {snapshot_date}")
+        return False
+
+    # Get daily transactions (buy/sell amounts)
+    with conn.cursor(pymysql.cursors.DictCursor) as cur:
+        cur.execute(
+            """
+            SELECT
+                COALESCE(SUM(CASE WHEN io_tp_nm = '매수' THEN cntr_qty * cntr_uv ELSE 0 END), 0) as buy_amt,
+                COALESCE(SUM(CASE WHEN io_tp_nm = '매도' THEN cntr_qty * cntr_uv ELSE 0 END), 0) as sell_amt
+            FROM account_trade_history
+            WHERE trade_date = %s
+            """,
+            (snapshot_date,),
+        )
+        txn = cur.fetchone()
+
+    buy_amt = Decimal(str(txn["buy_amt"])) if txn and txn["buy_amt"] else Decimal(0)
+    sell_amt = Decimal(str(txn["sell_amt"])) if txn and txn["sell_amt"] else Decimal(0)
+
+    # Calculate realized PnL from closed lots
+    with conn.cursor(pymysql.cursors.DictCursor) as cur:
+        cur.execute(
+            """
+            SELECT COALESCE(SUM(realized_pnl), 0) as realized_pnl
+            FROM daily_lots
+            WHERE closed_date = %s AND is_closed = TRUE
+            """,
+            (snapshot_date,),
+        )
+        lot_pnl = cur.fetchone()
+
+    realized_pnl = Decimal(str(lot_pnl["realized_pnl"])) if lot_pnl and lot_pnl["realized_pnl"] else Decimal(0)
+
+    # Insert or update daily snapshot
+    insert_sql = """
+        INSERT INTO daily_portfolio_snapshot (
+            snapshot_date, total_asset_usd, stock_value_usd, total_cost_usd,
+            deposit_usd, withdraw_usd, buy_amt_usd, sell_amt_usd,
+            unrealized_pnl_usd, realized_pnl_usd
+        )
+        VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+        ON DUPLICATE KEY UPDATE
+            total_asset_usd = VALUES(total_asset_usd),
+            stock_value_usd = VALUES(stock_value_usd),
+            total_cost_usd = VALUES(total_cost_usd),
+            buy_amt_usd = VALUES(buy_amt_usd),
+            sell_amt_usd = VALUES(sell_amt_usd),
+            unrealized_pnl_usd = VALUES(unrealized_pnl_usd),
+            realized_pnl_usd = VALUES(realized_pnl_usd)
+    """
+
+    with conn.cursor() as cur:
+        cur.execute(
+            insert_sql,
+            (
+                snapshot_date,
+                float(total_asset),
+                float(stock_value),
+                float(total_cost),
+                0,  # deposit - not available from KIS API
+                0,  # withdraw - not available from KIS API
+                float(buy_amt),
+                float(sell_amt),
+                float(unrealized_pnl),
+                float(realized_pnl),
+            ),
+        )
+
+    conn.commit()
+    return True
