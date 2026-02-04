@@ -20,6 +20,7 @@ WATCHLIST_CSV = WATCHLIST_DIR / "watchlist.csv"
 WATCHLIST_XLSX = WATCHLIST_DIR / "watchlist.xlsx"
 SETTINGS_CSV = WATCHLIST_DIR / "settings.csv"
 DAILY_TRIGGERS_FILE = WATCHLIST_DIR / ".daily_triggers.json"
+POSITION_TRACKING_FILE = WATCHLIST_DIR / ".position_tracking.json"  # Tracks bought units per symbol
 
 # US Eastern timezone
 ET = ZoneInfo("America/New_York")
@@ -66,6 +67,7 @@ class MonitorService:
         self._file_mtime: float = 0  # File modification time
         self._pre_market_reloaded: bool = False  # Track pre-market reload
         self._price_cache: Dict[str, dict] = {}  # Cache from poller
+        self._total_assets: float = 0  # Cached total assets for unit calculation
         self._load_daily_triggers()  # Load persisted bot trades
 
     def _load_daily_triggers(self):
@@ -222,11 +224,21 @@ class MonitorService:
                     "ticker": ticker,
                     "target_price": float(target_price),
                     "stop_loss_pct": None,
+                    "max_units": 1,  # Default: 1 unit (single entry)
+                    "added_date": None,
                 }
 
                 # Optional custom stop loss
                 if "stop_loss_pct" in row and not pd.isna(row["stop_loss_pct"]):
                     item["stop_loss_pct"] = float(row["stop_loss_pct"])
+
+                # max_units: how many units to buy (allows pyramiding)
+                if "max_units" in row and not pd.isna(row["max_units"]):
+                    item["max_units"] = int(row["max_units"])
+
+                # added_date: when this item was added to watchlist
+                if "added_date" in row and not pd.isna(row["added_date"]):
+                    item["added_date"] = str(row["added_date"])
 
                 watchlist.append(item)
 
@@ -346,24 +358,130 @@ class MonitorService:
 
         return None
 
+    def get_total_assets(self) -> float:
+        """Get total portfolio value from account summary."""
+        if self._total_assets > 0:
+            return self._total_assets
+
+        try:
+            from db.connection import get_connection
+            conn = get_connection()
+            with conn.cursor() as cur:
+                # Get latest account summary (total_eval_amt = total portfolio value)
+                cur.execute("""
+                    SELECT total_eval_amt FROM account_summary
+                    ORDER BY snapshot_date DESC LIMIT 1
+                """)
+                row = cur.fetchone()
+                if row and row[0]:
+                    self._total_assets = float(row[0])
+            conn.close()
+        except Exception as e:
+            print(f"[WARN] Failed to get total assets: {e}")
+
+        # Fallback: use API
+        if self._total_assets <= 0:
+            try:
+                summary = self.client.get_account_summary()
+                if summary:
+                    self._total_assets = float(summary.get("tot_evlu_amt", 0))
+            except Exception as e:
+                print(f"[WARN] Failed to get total assets from API: {e}")
+
+        return self._total_assets
+
+    def get_current_units_held(self, symbol: str) -> float:
+        """
+        Calculate how many units are currently held for a symbol.
+        Uses PURCHASE COST (not current value) to avoid the problem where
+        a stock that doubled would show 2x units.
+
+        1 unit = 5% of total portfolio value
+
+        Example:
+        - Total assets: $100,000, 1 unit = $5,000
+        - Bought $4,500 of AAPL (0.9 units)
+        - AAPL doubles to $9,000 market value
+        - current_units = $4,500 / $5,000 = 0.9 (not 1.8!)
+        """
+        total_assets = self.get_total_assets()
+        if total_assets <= 0:
+            return 0
+
+        unit_value = total_assets * 0.05  # 1 unit = 5%
+
+        # Get PURCHASE COST from holdings (not market value)
+        try:
+            from db.connection import get_connection
+            conn = get_connection()
+            with conn.cursor() as cur:
+                # Use pur_amt (purchase amount) instead of evlt_amt (evaluation amount)
+                cur.execute("""
+                    SELECT pur_amt FROM holdings
+                    WHERE stk_cd = %s
+                    ORDER BY snapshot_date DESC LIMIT 1
+                """, (symbol,))
+                row = cur.fetchone()
+                if row and row[0]:
+                    purchase_cost = float(row[0])
+                    current_units = purchase_cost / unit_value
+                    return current_units
+            conn.close()
+        except Exception as e:
+            print(f"[WARN] Failed to get holdings for {symbol}: {e}")
+
+        # Fallback: check daily_lots for total_cost
+        try:
+            from db.connection import get_connection
+            conn = get_connection()
+            with conn.cursor() as cur:
+                cur.execute("""
+                    SELECT SUM(total_cost) FROM daily_lots
+                    WHERE stock_code = %s AND net_quantity > 0
+                """, (symbol,))
+                row = cur.fetchone()
+                if row and row[0]:
+                    total_cost = float(row[0])
+                    return total_cost / unit_value
+            conn.close()
+        except Exception:
+            pass
+
+        # Fallback: check order_service positions
+        for pos in self.order_service.get_open_positions():
+            if pos["symbol"] == symbol:
+                qty = pos.get("quantity", 0)
+                entry_price = pos.get("entry_price", 0)
+                purchase_cost = qty * entry_price
+                return purchase_cost / unit_value if unit_value > 0 else 0
+
+        return 0
+
     def check_breakout_entry(self, item: dict) -> bool:
         """
         Check if breakout entry condition is met.
 
         Returns True if:
         - Current price >= target price (+ tick buffer applied in order)
-        - Not already triggered today
-        - Not already have position
+        - Not already triggered today (for this unit)
+        - current_units < max_units (allows pyramiding based on actual holdings)
         """
         symbol = item["ticker"]
         target_price = item["target_price"]
+        max_units = item.get("max_units", 1)
 
-        # Already triggered today?
-        if symbol in self.daily_triggers:
+        # Check how many units already held (from actual holdings, includes manual buys)
+        current_units = self.get_current_units_held(symbol)
+
+        # Already at max units?
+        if current_units >= max_units:
             return False
 
-        # Already have position?
-        if self.order_service.has_position(symbol):
+        # Count today's bot triggers for this symbol
+        today_triggers = self.daily_triggers.get(symbol, {}).get("trigger_count", 0)
+
+        # Max 1 trigger per day per symbol (to avoid rapid-fire buying on volatile days)
+        if today_triggers >= 1:
             return False
 
         # Get current price
@@ -375,7 +493,9 @@ class MonitorService:
 
         # Check breakout (current >= target)
         if current_price >= target_price:
+            remaining_units = max_units - current_units
             print(f"[{symbol}] BREAKOUT: ${current_price:.2f} >= ${target_price:.2f}")
+            print(f"[{symbol}] Units: {current_units:.2f}/{max_units} held, {remaining_units:.2f} remaining")
             return True
 
         return False
@@ -387,16 +507,23 @@ class MonitorService:
         Returns True if:
         - It's market open time
         - Open price > target price
+        - current_units < max_units (allows pyramiding)
         - Not already triggered today
-        - Not already have position
         """
         symbol = item["ticker"]
         target_price = item["target_price"]
+        max_units = item.get("max_units", 1)
 
-        if symbol in self.daily_triggers:
+        # Check how many units already held (from actual holdings, includes manual buys)
+        current_units = self.get_current_units_held(symbol)
+
+        # Already at max units?
+        if current_units >= max_units:
             return False
 
-        if self.order_service.has_position(symbol):
+        # Count today's bot triggers for this symbol
+        today_triggers = self.daily_triggers.get(symbol, {}).get("trigger_count", 0)
+        if today_triggers >= 1:
             return False
 
         price_data = self.get_price(symbol)
@@ -407,7 +534,9 @@ class MonitorService:
 
         # Gap up: open >= target
         if open_price >= target_price:
+            remaining_units = max_units - current_units
             print(f"[{symbol}] GAP UP: Open ${open_price:.2f} >= ${target_price:.2f}")
+            print(f"[{symbol}] Units: {current_units:.2f}/{max_units} held, {remaining_units:.2f} remaining")
             return True
 
         return False
@@ -434,10 +563,15 @@ class MonitorService:
         )
 
         if result:
+            # Track trigger count for the day (allows checking max 1 trigger per day)
+            existing = self.daily_triggers.get(symbol, {})
+            trigger_count = existing.get("trigger_count", 0) + 1
+
             self.daily_triggers[symbol] = {
                 "entry_type": "gap_up" if is_gap_up else "breakout",
                 "entry_time": datetime.now().isoformat(),
                 "entry_price": entry_price,
+                "trigger_count": trigger_count,
             }
             self._save_daily_triggers()  # Persist to file
             return True
