@@ -72,6 +72,7 @@ class MonitorService:
         self._skipped_symbols: Dict[str, float] = {}  # Track skipped symbols with timestamp (for one-time logging)
         self._today_api_buys: Optional[set] = None  # Cache today's API buy symbols
         self._load_daily_triggers(verbose=True)  # Load persisted bot trades
+        self._merge_api_buys_to_triggers()  # Also load from KIS API directly
 
     def _get_today_et(self) -> date:
         """Get today's date in US Eastern time."""
@@ -202,6 +203,29 @@ class MonitorService:
                 print(f"[TRIGGERS] Today's trades: {', '.join(parts)}")
             else:
                 print("[TRIGGERS] No trades today")
+
+    def _merge_api_buys_to_triggers(self):
+        """
+        Load today's buys from KIS API and merge into daily_triggers.
+        Called on startup to ensure all trades are captured even if DB sync is delayed.
+        """
+        try:
+            api_buys = self._load_today_api_buys()
+            added = 0
+            for symbol in api_buys:
+                if symbol not in self.daily_triggers:
+                    self.daily_triggers[symbol] = {
+                        "entry_type": "api",
+                        "entry_time": "",
+                        "entry_price": 0,
+                        "trigger_count": 1,
+                    }
+                    added += 1
+            if added > 0:
+                print(f"[API] Added {added} symbols from KIS API to triggers")
+                self._log_triggers_if_changed(force=True)
+        except Exception as e:
+            print(f"[WARN] Failed to merge API buys: {e}")
 
     def _load_today_api_buys(self) -> set:
         """
