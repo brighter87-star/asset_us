@@ -760,43 +760,34 @@ class MonitorService:
 
     def _quick_sync_after_trade(self):
         """
-        Quick sync after a trade to update trade history, holdings and lots.
+        Quick sync after a trade - runs in background thread to avoid blocking.
+        Only syncs trade history (lightweight). Full sync happens via cron.
         """
-        try:
-            from datetime import date
-            from db.connection import get_connection
-            from services.data_sync_service import sync_holdings_from_kis, sync_trade_history_from_kis
-            from services.lot_service import construct_daily_lots, update_lot_metrics
+        import threading
 
-            print("[SYNC] Running quick sync after trade...")
-            conn = get_connection()
-
+        def _sync_worker():
             try:
-                # 1. Sync trade history from API (so DB has the new trade)
-                trade_count = sync_trade_history_from_kis(conn)
-                print(f"[SYNC] Trade history synced: {trade_count}")
+                from db.connection import get_connection
+                from services.data_sync_service import sync_trade_history_from_kis
 
-                # 2. Sync holdings from API
-                holdings_count = sync_holdings_from_kis(conn, snapshot_date=date.today())
-                print(f"[SYNC] Holdings synced: {holdings_count}")
+                conn = get_connection()
+                try:
+                    # Only sync trade history (lightweight, ~2-3 API calls)
+                    trade_count = sync_trade_history_from_kis(conn)
+                    print(f"[SYNC] Trade history synced: {trade_count}")
+                finally:
+                    conn.close()
 
-                # 3. Reconstruct lots
-                construct_daily_lots(conn)
-                print("[SYNC] Lots reconstructed")
-
-                # 4. Update lot metrics
-                lot_count = update_lot_metrics(conn, date.today())
-                print(f"[SYNC] Lot metrics updated: {lot_count}")
-
-                # 5. Invalidate cache
+                # Invalidate cache
                 self._total_assets = 0
-                print("[SYNC] Cache invalidated")
 
-            finally:
-                conn.close()
+            except Exception as e:
+                print(f"[WARN] Quick sync failed: {e}")
 
-        except Exception as e:
-            print(f"[WARN] Quick sync failed: {e}")
+        # Run in background thread
+        thread = threading.Thread(target=_sync_worker, daemon=True)
+        thread.start()
+        print("[SYNC] Started background sync...")
 
     def check_and_execute_stop_loss(self) -> List[str]:
         """
