@@ -80,21 +80,23 @@ class MonitorService:
         self._merge_api_buys_to_triggers()  # Also load from KIS API directly
 
     def _startup_sync(self):
-        """Sync trade history and holdings from API to DB on startup."""
+        """Sync recent trade history and holdings from API to DB on startup."""
         try:
-            from datetime import date
+            from datetime import date, timedelta
             from db.connection import get_connection
             from services.data_sync_service import sync_trade_history_from_kis, sync_holdings_from_kis
 
-            print("[STARTUP] Syncing from KIS API...")
+            print("[STARTUP] Syncing from KIS API (last 3 days)...")
             conn = get_connection()
             try:
-                # 1. Sync trade history
-                trade_count = sync_trade_history_from_kis(conn)
+                # 1. Sync trade history (last 3 days only for fast startup)
+                today = date.today()
+                start_date = (today - timedelta(days=3)).strftime("%Y%m%d")
+                trade_count = sync_trade_history_from_kis(conn, start_date=start_date)
                 print(f"[STARTUP] Trade history: {trade_count} records")
 
                 # 2. Sync holdings (for accurate unit calculation)
-                holdings_count = sync_holdings_from_kis(conn, snapshot_date=date.today())
+                holdings_count = sync_holdings_from_kis(conn, snapshot_date=today)
                 print(f"[STARTUP] Holdings: {holdings_count} records")
             finally:
                 conn.close()
