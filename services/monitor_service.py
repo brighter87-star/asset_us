@@ -359,17 +359,18 @@ class MonitorService:
         return None
 
     def get_total_assets(self) -> float:
-        """Get total portfolio value from account summary."""
+        """Get total portfolio value from account summary or holdings."""
         if self._total_assets > 0:
             return self._total_assets
 
+        # Try account_summary first
         try:
             from db.connection import get_connection
             conn = get_connection()
             with conn.cursor() as cur:
-                # Get latest account summary (total_eval_amt = total portfolio value)
+                # tot_est_amt = 총평가금액 (주식+예수금)
                 cur.execute("""
-                    SELECT total_eval_amt FROM account_summary
+                    SELECT tot_est_amt FROM account_summary
                     ORDER BY snapshot_date DESC LIMIT 1
                 """)
                 row = cur.fetchone()
@@ -377,16 +378,25 @@ class MonitorService:
                     self._total_assets = float(row[0])
             conn.close()
         except Exception as e:
-            print(f"[WARN] Failed to get total assets: {e}")
+            print(f"[WARN] Failed to get total assets from account_summary: {e}")
 
-        # Fallback: use API
+        # Fallback: sum from holdings
         if self._total_assets <= 0:
             try:
-                summary = self.client.get_account_summary()
-                if summary:
-                    self._total_assets = float(summary.get("tot_evlu_amt", 0))
+                from db.connection import get_connection
+                conn = get_connection()
+                with conn.cursor() as cur:
+                    # Sum of all holdings evaluation amounts
+                    cur.execute("""
+                        SELECT SUM(evlt_amt) FROM holdings
+                        WHERE snapshot_date = (SELECT MAX(snapshot_date) FROM holdings)
+                    """)
+                    row = cur.fetchone()
+                    if row and row[0]:
+                        self._total_assets = float(row[0])
+                conn.close()
             except Exception as e:
-                print(f"[WARN] Failed to get total assets from API: {e}")
+                print(f"[WARN] Failed to get total assets from holdings: {e}")
 
         return self._total_assets
 
