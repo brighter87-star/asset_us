@@ -168,19 +168,30 @@ def show_status():
     session_labels = {"PRE": "Pre-Market", "REGULAR": "Regular", "AFTER": "After-Hours", "CLOSED": "Closed"}
     print(f"  Session: {session_labels[session]}")
 
-    # Watchlist
-    print(f"\n[Watchlist] ({status['watchlist_count']} items)")
-    print("-" * 60)
-    print(f"{'Symbol':<8} {'Target($)':>12} {'SL%':>8}")
-    print("-" * 60)
-
+    # Watchlist - only show actionable items (current_units < max_units)
+    actionable_count = 0
+    actionable_items = []
     for item in monitor.watchlist:
+        ticker = item['ticker']
+        max_units = item.get('max_units', 1)
+        current_units = monitor.get_current_units_held(ticker)
+        if current_units < max_units:
+            actionable_count += 1
+            actionable_items.append((item, current_units, max_units))
+
+    print(f"\n[Watchlist] ({actionable_count}/{status['watchlist_count']} actionable)")
+    print("-" * 70)
+    print(f"{'Symbol':<8} {'Target($)':>12} {'Units':>10} {'SL%':>8}")
+    print("-" * 70)
+
+    for item, current_units, max_units in actionable_items:
         symbol = item['ticker']
         target = item['target_price']
         sl = item.get('stop_loss_pct') or monitor.trading_settings.STOP_LOSS_PCT
-        print(f"{symbol:<8} {target:>12,.2f} {sl:>7.1f}%")
+        units_str = f"{current_units:.1f}/{max_units}"
+        print(f"{symbol:<8} {target:>12,.2f} {units_str:>10} {sl:>7.1f}%")
 
-    print("-" * 60)
+    print("-" * 70)
 
     # Open positions
     print(f"\n[Open Positions] ({status['open_positions']})")
@@ -242,14 +253,24 @@ def show_live_status(monitor: MonitorService, prices: dict, holdings_prices: dic
     print(f"[{now.strftime('%H:%M:%S.%f')[:12]}] Live Monitoring (US Stocks) [{session_labels[session]}]")
     print("=" * 90)
 
-    # Watchlist section ($ in label only)
-    print("[Watchlist]")
-    print(f"{'Symbol':<8} {'Target($)':>12} {'Current($)':>12} {'Diff':>10} {'Status':>10}")
-    print("-" * 65)
-
+    # Watchlist section - only show items where current_units < max_units
+    # Filter watchlist to only show actionable items
+    actionable_items = []
     for item in monitor.watchlist:
         ticker = item['ticker']
+        max_units = item.get('max_units', 1)
+        current_units = monitor.get_current_units_held(ticker)
+        if current_units < max_units:
+            actionable_items.append((item, current_units, max_units))
+
+    print(f"[Watchlist] ({len(actionable_items)}/{len(monitor.watchlist)} actionable)")
+    print(f"{'Symbol':<8} {'Target($)':>12} {'Current($)':>12} {'Diff':>10} {'Units':>8} {'Status':>10}")
+    print("-" * 75)
+
+    for item, current_units, max_units in actionable_items:
+        ticker = item['ticker']
         target = item['target_price']
+        units_str = f"{current_units:.1f}/{max_units}"
 
         price_data = prices.get(ticker, {})
         current = price_data.get('last', 0)
@@ -285,11 +306,11 @@ def show_live_status(monitor: MonitorService, prices: dict, holdings_prices: dic
                 else:
                     status_str = "WAIT"
 
-            print(f"{ticker:<8} {target:>12,.2f} {current:>12,.2f} {diff_str:>10} {status_str:>10}")
+            print(f"{ticker:<8} {target:>12,.2f} {current:>12,.2f} {diff_str:>10} {units_str:>8} {status_str:>10}")
         else:
-            print(f"{ticker:<8} {target:>12,.2f} {'---':>12} {'---':>10} {'LOADING':>10}")
+            print(f"{ticker:<8} {target:>12,.2f} {'---':>12} {'---':>10} {units_str:>8} {'LOADING':>10}")
 
-    print("-" * 65)
+    print("-" * 75)
 
     # Holdings Stop Loss Monitor section
     if positions:
