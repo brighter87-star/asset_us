@@ -75,32 +75,13 @@ class MonitorService:
         return datetime.now(ET).date()
 
     def _load_daily_triggers(self):
-        """Load daily triggers from file and database (US ET date)."""
+        """Load daily triggers from database (US ET date). DB is source of truth."""
         today_et = self._get_today_et()
-
-        # 1. Try loading from JSON file first
-        try:
-            if DAILY_TRIGGERS_FILE.exists():
-                with open(DAILY_TRIGGERS_FILE, "r", encoding="utf-8") as f:
-                    data = json.load(f)
-
-                # Only load if same date (US ET)
-                saved_date = data.get("date")
-                if saved_date == str(today_et):
-                    self.daily_triggers = data.get("triggers", {})
-                    print(f"[TRIGGERS] Loaded {len(self.daily_triggers)} bot trades from file")
-                else:
-                    self.daily_triggers = {}
-                    print(f"[TRIGGERS] New trading day (ET), starting fresh")
-        except Exception as e:
-            print(f"[WARN] Failed to load daily triggers from file: {e}")
-            self.daily_triggers = {}
-
-        # 2. Also load from database for today's trades (in case file was lost)
+        self.daily_triggers = {}
         self._load_today_trades_from_db(today_et)
 
     def _load_today_trades_from_db(self, today_et: date):
-        """Load today's bot trades from database to supplement file data."""
+        """Load today's trades from database. DB is the source of truth."""
         try:
             from db.connection import get_connection
             conn = get_connection()
@@ -127,29 +108,35 @@ class MonitorService:
             # Track sold symbols
             sold_symbols = set(row[0] for row in sells)
 
-            # Add any trades from DB that aren't in our triggers
-            db_count = 0
+            # Load all trades from DB
             for stk_cd, cntr_uv, ord_tm in buys:
                 if stk_cd not in self.daily_triggers:
                     self.daily_triggers[stk_cd] = {
-                        "entry_type": "db_loaded",
+                        "entry_type": "db",
                         "entry_time": str(ord_tm) if ord_tm else "",
                         "entry_price": float(cntr_uv) if cntr_uv else 0,
                         "trigger_count": 1,
                         "sold": stk_cd in sold_symbols,
                     }
-                    db_count += 1
-                elif stk_cd in sold_symbols:
-                    # Mark as sold if we have a sell record
-                    self.daily_triggers[stk_cd]["sold"] = True
+                else:
+                    # Increment trigger count for multiple buys of same stock
+                    self.daily_triggers[stk_cd]["trigger_count"] += 1
 
-            if db_count > 0:
-                print(f"[TRIGGERS] Loaded {db_count} additional trades from database")
+            # Mark sold symbols
+            for symbol in sold_symbols:
+                if symbol in self.daily_triggers:
+                    self.daily_triggers[symbol]["sold"] = True
+
+            if self.daily_triggers:
+                symbols = list(self.daily_triggers.keys())
+                print(f"[TRIGGERS] Loaded {len(symbols)} trades from DB: {symbols}")
             if sold_symbols:
                 print(f"[TRIGGERS] Sold today: {sold_symbols}")
 
         except Exception as e:
             print(f"[WARN] Failed to load trades from database: {e}")
+            import traceback
+            traceback.print_exc()
 
     def _save_daily_triggers(self):
         """Save daily triggers to file (US ET date)."""
@@ -681,32 +668,35 @@ class MonitorService:
 
     def _quick_sync_after_trade(self):
         """
-        Quick sync after a trade to update holdings and lots.
-        Lighter than full daily_sync - only updates holdings + lots.
+        Quick sync after a trade to update trade history, holdings and lots.
         """
         try:
             from datetime import date
             from db.connection import get_connection
-            from services.data_sync_service import sync_holdings_from_kis
+            from services.data_sync_service import sync_holdings_from_kis, sync_trade_history_from_kis
             from services.lot_service import construct_daily_lots, update_lot_metrics
 
             print("[SYNC] Running quick sync after trade...")
             conn = get_connection()
 
             try:
-                # 1. Sync holdings from API
+                # 1. Sync trade history from API (so DB has the new trade)
+                trade_count = sync_trade_history_from_kis(conn)
+                print(f"[SYNC] Trade history synced: {trade_count}")
+
+                # 2. Sync holdings from API
                 holdings_count = sync_holdings_from_kis(conn, snapshot_date=date.today())
                 print(f"[SYNC] Holdings synced: {holdings_count}")
 
-                # 2. Reconstruct lots
+                # 3. Reconstruct lots
                 construct_daily_lots(conn)
                 print("[SYNC] Lots reconstructed")
 
-                # 3. Update lot metrics
+                # 4. Update lot metrics
                 lot_count = update_lot_metrics(conn, date.today())
                 print(f"[SYNC] Lot metrics updated: {lot_count}")
 
-                # 4. Invalidate cache
+                # 5. Invalidate cache
                 self._total_assets = 0
                 print("[SYNC] Cache invalidated")
 
@@ -934,6 +924,10 @@ class MonitorService:
         self._save_daily_triggers()  # Persist reset
         print("[INFO] Daily triggers reset")
 
+    def refresh_daily_triggers(self):
+        """Refresh daily triggers from database. Call this periodically."""
+        self._load_daily_triggers()
+
     def run_monitoring_cycle(self) -> dict:
         """
         Run one monitoring cycle.
@@ -948,6 +942,9 @@ class MonitorService:
             "close_actions": {},
             "reloaded": False,
         }
+
+        # Refresh daily triggers from DB every cycle
+        self._load_daily_triggers()
 
         # Check for file changes
         if self.reload_if_changed():
