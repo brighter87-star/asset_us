@@ -17,6 +17,7 @@ def get_connection(database=None):
 
     return pymysql.connect(
         host=settings.DB_HOST,
+        port=settings.DB_PORT,
         user=settings.DB_USER,
         password=settings.DB_PASSWORD,
         database=db_name,

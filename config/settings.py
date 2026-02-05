@@ -27,6 +27,7 @@ class Settings(BaseSettings):
 
     # Database configuration
     DB_HOST: str = "localhost"
+    DB_PORT: int = 3306
     DB_USER: str
     DB_PASSWORD: str
     DB_NAME: str = "asset_us"
