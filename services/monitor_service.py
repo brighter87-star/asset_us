@@ -78,7 +78,7 @@ class MonitorService:
         self._today_api_buys: Optional[set] = None  # Cache today's API buy symbols
         self._today_api_sells: Optional[set] = None  # Cache today's API sell symbols
         self._last_holdings_refresh: float = 0  # Timestamp of last holdings refresh
-        self._holdings_refresh_interval: int = 300  # Refresh every 5 minutes (300 seconds)
+        self._holdings_refresh_interval: int = 60  # Refresh every 1 minute (60 seconds)
 
         # Sync trade history on startup to ensure DB is up-to-date
         self._startup_sync()
@@ -1276,6 +1276,47 @@ class MonitorService:
         """Refresh daily triggers from database. Call this periodically."""
         self._load_daily_triggers()
 
+    def _periodic_holdings_refresh(self):
+        """
+        Periodically refresh holdings from API (every 1 minute).
+        Only syncs today's data to minimize API load.
+        """
+        now = time_module.time()
+        if now - self._last_holdings_refresh < self._holdings_refresh_interval:
+            return False
+
+        try:
+            from datetime import date
+            from db.connection import get_connection
+            from services.data_sync_service import sync_holdings_from_kis
+
+            conn = get_connection()
+            try:
+                # Only sync today's holdings (lightweight)
+                today = date.today()
+                holdings_count = sync_holdings_from_kis(conn, snapshot_date=today)
+                if holdings_count > 0:
+                    print(f"[REFRESH] Holdings synced: {holdings_count} records")
+
+                    # Refresh positions from DB
+                    self.order_service.sync_positions_from_db(
+                        stop_loss_pct=self.trading_settings.STOP_LOSS_PCT
+                    )
+
+                    # Invalidate caches
+                    self._total_assets = 0
+                    self._today_api_buys = None
+                    self._today_api_sells = None
+            finally:
+                conn.close()
+
+            self._last_holdings_refresh = now
+            return True
+        except Exception as e:
+            print(f"[WARN] Periodic refresh failed: {e}")
+            self._last_holdings_refresh = now  # Don't retry immediately
+            return False
+
     def run_monitoring_cycle(self) -> dict:
         """
         Run one monitoring cycle.
@@ -1290,6 +1331,9 @@ class MonitorService:
             "close_actions": {},
             "reloaded": False,
         }
+
+        # Periodic holdings refresh (every 1 minute)
+        self._periodic_holdings_refresh()
 
         # Refresh daily triggers from DB every cycle
         self._load_daily_triggers()
