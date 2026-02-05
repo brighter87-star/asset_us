@@ -78,6 +78,7 @@ class MonitorService:
         self._skipped_symbols: Dict[str, float] = {}  # Track skipped symbols with timestamp (for one-time logging)
         self._today_api_buys: Optional[set] = None  # Cache today's API buy symbols
         self._today_api_sells: Optional[set] = None  # Cache today's API sell symbols
+        self._expired_stocks: Optional[set] = None  # Cache stocks sold after added_date
         self._last_holdings_refresh: float = 0  # Timestamp of last holdings refresh
         self._holdings_refresh_interval: int = 60  # Refresh every 1 minute (60 seconds)
 
@@ -421,6 +422,58 @@ class MonitorService:
 
         return self._today_api_sells
 
+    def get_expired_stocks(self) -> set:
+        """
+        Get stocks that have sell records on or after their added_date.
+        These stocks are considered 'expired' and should not be monitored.
+        Cached to avoid repeated DB queries.
+        """
+        if self._expired_stocks is not None:
+            return self._expired_stocks
+
+        expired = set()
+
+        try:
+            from datetime import datetime
+            from db.connection import get_connection
+
+            conn = get_connection()
+            with conn.cursor() as cur:
+                for item in self.watchlist:
+                    ticker = item.get("ticker", "")
+                    added_date_str = item.get("added_date", "")
+
+                    if not ticker or not added_date_str:
+                        continue
+
+                    try:
+                        added_date = datetime.strptime(str(added_date_str), "%Y-%m-%d").date()
+                    except ValueError:
+                        continue
+
+                    # Check if there's a sell record on or after added_date
+                    cur.execute("""
+                        SELECT COUNT(*) FROM account_trade_history
+                        WHERE stk_cd = %s
+                          AND trade_date >= %s
+                          AND io_tp_nm LIKE '%%매도%%'
+                    """, (ticker, added_date))
+                    row = cur.fetchone()
+                    if row and row[0] > 0:
+                        expired.add(ticker)
+
+            conn.close()
+
+            if expired:
+                print(f"[EXPIRED] Stocks sold after added_date: {sorted(expired)}")
+
+            self._expired_stocks = expired
+        except Exception as e:
+            print(f"[WARN] Failed to check expired stocks: {e}")
+            self._expired_stocks = set()
+
+        return self._expired_stocks
+
     def has_today_api_buy(self, symbol: str) -> bool:
         """
         Safety check: query KIS API directly for today's buy orders.
@@ -611,6 +664,7 @@ class MonitorService:
 
             self.watchlist = watchlist
             self._file_mtime = self._get_file_mtime()
+            self._expired_stocks = None  # Invalidate expired cache on reload
             print(f"[INFO] Loaded {len(watchlist)} items from watchlist")
             return watchlist
 
@@ -878,10 +932,15 @@ class MonitorService:
         - Current price >= target price (+ tick buffer applied in order)
         - Not already triggered today (for this unit)
         - current_units < max_units (allows pyramiding based on actual holdings)
+        - Not expired (no sell after added_date)
         """
         symbol = item["ticker"]
         target_price = item["target_price"]
         max_units = item.get("max_units", 1)
+
+        # Skip expired stocks (sold after added_date)
+        if symbol in self.get_expired_stocks():
+            return False
 
         # Check how many units already held (from actual holdings, includes manual buys)
         current_units = self.get_current_units_held(symbol)
@@ -936,10 +995,15 @@ class MonitorService:
         - Open price > target price
         - current_units < max_units (allows pyramiding)
         - Not already triggered today
+        - Not expired (no sell after added_date)
         """
         symbol = item["ticker"]
         target_price = item["target_price"]
         max_units = item.get("max_units", 1)
+
+        # Skip expired stocks (sold after added_date)
+        if symbol in self.get_expired_stocks():
+            return False
 
         # Check how many units already held (from actual holdings, includes manual buys)
         current_units = self.get_current_units_held(symbol)

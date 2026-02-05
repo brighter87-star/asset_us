@@ -258,8 +258,10 @@ def show_live_status(monitor: MonitorService, prices: dict, holdings_prices: dic
     # 보유 종목 정보
     positions = {pos['symbol']: pos for pos in monitor.order_service.get_open_positions()}
 
-    # 당일 매도 종목 (EXPIRED 표시용)
+    # EXPIRED 종목: 당일 매도 또는 added_date 이후 매도 기록이 있는 종목
     today_sells = monitor._load_today_api_sells()
+    expired_stocks = monitor.get_expired_stocks()
+    all_expired = today_sells | expired_stocks  # 두 집합 합치기
 
     # 워치리스트 티커 집합
     watchlist_tickers = {item['ticker'] for item in monitor.watchlist}
@@ -303,7 +305,7 @@ def show_live_status(monitor: MonitorService, prices: dict, holdings_prices: dic
             'pnl_pct': pnl_pct,
             'units': current_units,
             'max_units': max_units,
-            'is_expired': ticker in today_sells,
+            'is_expired': ticker in all_expired,
         })
 
     # Sort by P/L% descending
@@ -352,8 +354,8 @@ def show_live_status(monitor: MonitorService, prices: dict, holdings_prices: dic
 
         max_units = item.get('max_units', 1)
 
-        # 당일 매도된 종목은 units를 0으로 처리 (DB가 아직 업데이트 안됐을 수 있음)
-        if ticker in today_sells:
+        # EXPIRED 종목은 units를 0으로 처리 (감시 대상 아님)
+        if ticker in all_expired:
             current_units = 0.0
         else:
             current_units = monitor.get_current_units_held(ticker)
@@ -379,7 +381,7 @@ def show_live_status(monitor: MonitorService, prices: dict, holdings_prices: dic
             'diff_pct': diff_pct,
             'units': current_units,
             'max_units': max_units,
-            'is_expired': ticker in today_sells,
+            'is_expired': ticker in all_expired,
         })
 
     # Sort by diff ascending (closest to breakout first)
