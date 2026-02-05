@@ -836,14 +836,14 @@ class MonitorService:
         except Exception as e:
             print(f"[WARN] Failed to get holdings for {symbol}: {e}")
 
-        # Fallback: check daily_lots for total_cost
+        # Fallback: check daily_lots for total_cost (only active/unclosed lots)
         try:
             from db.connection import get_connection
             conn = get_connection()
             with conn.cursor() as cur:
                 cur.execute("""
                     SELECT SUM(total_cost) FROM daily_lots
-                    WHERE stock_code = %s AND net_quantity > 0
+                    WHERE stock_code = %s AND net_quantity > 0 AND is_closed = FALSE
                 """, (symbol,))
                 row = cur.fetchone()
                 if row and row[0]:
