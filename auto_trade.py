@@ -402,10 +402,8 @@ def show_live_status(monitor: MonitorService, prices: dict, holdings_prices: dic
                 diff_str = f"{d['diff_pct']:+.2f}%"
                 if d['diff_pct'] <= 0:
                     status = "BREAKOUT!"
-                elif d['diff_pct'] <= 1:
+                elif d['diff_pct'] < 3:
                     status = "NEAR"
-                elif d['diff_pct'] <= 5:
-                    status = "CLOSE"
                 else:
                     status = "WAIT"
             else:
