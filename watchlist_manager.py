@@ -77,8 +77,8 @@ def remove_item(ticker: str):
     print(f"[OK] Removed {ticker} from watchlist")
 
 
-def update_item(ticker: str, target_price: float = None, max_units: int = None, stop_loss_pct: float = None):
-    """Update existing item in watchlist."""
+def update_item(ticker: str, target_price: float = None, max_units: int = None, stop_loss_pct: float = None, reset_date: bool = True):
+    """Update existing item in watchlist. Resets added_date to today when target_price is updated."""
     df = load_watchlist()
     ticker = ticker.upper()
 
@@ -90,13 +90,17 @@ def update_item(ticker: str, target_price: float = None, max_units: int = None, 
 
     if target_price is not None:
         df.loc[idx, "target_price"] = target_price
+        # Reset added_date to today when target price is updated
+        if reset_date:
+            df.loc[idx, "added_date"] = str(date.today())
     if max_units is not None:
         df.loc[idx, "max_units"] = max_units
     if stop_loss_pct is not None:
         df.loc[idx, "stop_loss_pct"] = stop_loss_pct
 
     save_watchlist(df)
-    print(f"[OK] Updated {ticker}")
+    today_str = str(date.today())
+    print(f"[OK] Updated {ticker} @ ${target_price:.2f} (date={today_str})")
 
 
 def list_items():
@@ -244,11 +248,12 @@ def main():
     remove_parser.add_argument("ticker", type=str, help="Stock ticker")
 
     # update command
-    update_parser = subparsers.add_parser("update", help="Update item in watchlist")
+    update_parser = subparsers.add_parser("update", help="Update item in watchlist (resets added_date to today)")
     update_parser.add_argument("ticker", type=str, help="Stock ticker")
-    update_parser.add_argument("--target", type=float, help="New target price")
+    update_parser.add_argument("target_price", type=float, help="New target price")
     update_parser.add_argument("--max-units", type=int, help="New max units")
     update_parser.add_argument("--stop-loss", type=float, help="New stop loss %")
+    update_parser.add_argument("--no-date-reset", action="store_true", help="Don't reset added_date to today")
 
     # list command
     subparsers.add_parser("list", help="List all items in watchlist")
@@ -264,7 +269,7 @@ def main():
     elif args.command == "remove":
         remove_item(args.ticker)
     elif args.command == "update":
-        update_item(args.ticker, args.target, args.max_units, args.stop_loss)
+        update_item(args.ticker, args.target_price, args.max_units, args.stop_loss, reset_date=not args.no_date_reset)
     elif args.command == "list":
         list_items()
     elif args.command == "cleanup":
