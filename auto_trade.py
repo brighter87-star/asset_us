@@ -258,129 +258,211 @@ def show_live_status(monitor: MonitorService, prices: dict, holdings_prices: dic
     # 보유 종목 정보
     positions = {pos['symbol']: pos for pos in monitor.order_service.get_open_positions()}
 
+    # 당일 매도 종목 (EXPIRED 표시용)
+    today_sells = monitor._load_today_api_sells()
+
+    # 워치리스트 티커 집합
+    watchlist_tickers = {item['ticker'] for item in monitor.watchlist}
+
     # Header
     print(f"[{now.strftime('%H:%M:%S.%f')[:12]}] Live Monitoring (US Stocks) [{session_labels[session]}]")
     print("=" * 90)
 
-    # Watchlist section - only show items where current_units < max_units
-    # Filter watchlist and calculate diff for sorting
-    watchlist_data = []
+    stop_loss_pct = monitor.trading_settings.STOP_LOSS_PCT
+
+    # ============================================================
+    # Section 1: Watchlist + Holdings (워치리스트에 있으면서 보유 중)
+    # ============================================================
+    watchlist_holding_data = []
     for item in monitor.watchlist:
         ticker = item['ticker']
+        if ticker not in positions:
+            continue  # 보유하지 않음 -> Section 2로
+
         max_units = item.get('max_units', 1)
         current_units = monitor.get_current_units_held(ticker)
-        if current_units < max_units:
-            target = item['target_price']
-            price_data = prices.get(ticker, {})
-            current = price_data.get('last', 0)
-            if current <= 0:
-                current = holdings_prices.get(ticker, {}).get('last', 0)
+        target = item['target_price']
 
-            # Calculate diff_pct for sorting
-            if current > 0:
-                if ticker in positions:
-                    pos = positions[ticker]
-                    entry = pos.get('entry_price', 0)
-                    if entry > 0:
-                        diff_pct = ((current - entry) / entry) * 100
-                    else:
-                        diff_pct = 9999  # Unknown at bottom
+        pos = positions[ticker]
+        entry = pos.get('entry_price', 0)
+        stop_loss = pos.get('stop_loss_price', 0)
+
+        price_data = prices.get(ticker, {})
+        current = price_data.get('last', 0)
+        if current <= 0:
+            current = holdings_prices.get(ticker, {}).get('last', 0)
+
+        pnl_pct = ((current - entry) / entry) * 100 if current > 0 and entry > 0 else -9999
+
+        watchlist_holding_data.append({
+            'ticker': ticker,
+            'target': target,
+            'entry': entry,
+            'current': current,
+            'stop_loss': stop_loss,
+            'pnl_pct': pnl_pct,
+            'units': current_units,
+            'max_units': max_units,
+            'is_expired': ticker in today_sells,
+        })
+
+    # Sort by P/L% descending
+    watchlist_holding_data.sort(key=lambda x: x['pnl_pct'], reverse=True)
+
+    if watchlist_holding_data:
+        print(f"[Watchlist + Holdings] ({len(watchlist_holding_data)})")
+        print(f"{'Symbol':<8} {'Target($)':>10} {'Entry($)':>10} {'Current($)':>10} {'P/L%':>8} {'Stop($)':>10} {'Units':>7} {'Status':>8}")
+        print("-" * 85)
+
+        for d in watchlist_holding_data:
+            units_str = f"{d['units']:.1f}/{d['max_units']}"
+
+            if d['is_expired']:
+                status = "EXPIRED"
+                pnl_str = "---"
+            elif d['current'] > 0 and d['entry'] > 0:
+                pnl_str = f"{d['pnl_pct']:+.1f}%"
+                if d['current'] <= d['stop_loss']:
+                    status = "STOP!"
+                elif d['pnl_pct'] <= -stop_loss_pct * 0.7:
+                    status = "WARN"
+                elif d['pnl_pct'] > 0:
+                    status = "OK ▲"
                 else:
-                    diff_pct = ((target - current) / current) * 100
+                    status = "OK ▼"
             else:
-                diff_pct = 9999  # Loading at bottom
+                pnl_str = "---"
+                status = "---"
 
-            watchlist_data.append((item, current_units, max_units, current, diff_pct))
+            if d['current'] > 0:
+                print(f"{d['ticker']:<8} {d['target']:>10,.2f} {d['entry']:>10,.2f} {d['current']:>10,.2f} {pnl_str:>8} {d['stop_loss']:>10,.2f} {units_str:>7} {status:>8}")
+            else:
+                print(f"{d['ticker']:<8} {d['target']:>10,.2f} {d['entry']:>10,.2f} {'---':>10} {pnl_str:>8} {d['stop_loss']:>10,.2f} {units_str:>7} {'LOADING':>8}")
+
+        print("-" * 85)
+
+    # ============================================================
+    # Section 2: Watchlist Only (워치리스트에만 있음, 미보유)
+    # ============================================================
+    watchlist_only_data = []
+    for item in monitor.watchlist:
+        ticker = item['ticker']
+        if ticker in positions:
+            continue  # 보유 중 -> Section 1에서 처리됨
+
+        max_units = item.get('max_units', 1)
+        current_units = monitor.get_current_units_held(ticker)
+
+        # 이미 max_units 채웠으면 스킵 (actionable 아님)
+        if current_units >= max_units:
+            continue
+
+        target = item['target_price']
+
+        price_data = prices.get(ticker, {})
+        current = price_data.get('last', 0)
+        if current <= 0:
+            current = holdings_prices.get(ticker, {}).get('last', 0)
+
+        # 목표가까지 거리 (양수 = 아직 멀음, 음수/0 = 브레이크아웃)
+        diff_pct = ((target - current) / current) * 100 if current > 0 else 9999
+
+        watchlist_only_data.append({
+            'ticker': ticker,
+            'target': target,
+            'current': current,
+            'diff_pct': diff_pct,
+            'units': current_units,
+            'max_units': max_units,
+            'is_expired': ticker in today_sells,
+        })
 
     # Sort by diff ascending (closest to breakout first)
-    watchlist_data.sort(key=lambda x: x[4])
+    watchlist_only_data.sort(key=lambda x: x['diff_pct'])
 
-    print(f"[Watchlist] ({len(watchlist_data)}/{len(monitor.watchlist)} actionable)")
-    print(f"{'Symbol':<8} {'Target($)':>12} {'Current($)':>12} {'Diff':>10} {'Units':>8} {'Status':>10}")
-    print("-" * 75)
+    if watchlist_only_data:
+        print(f"\n[Watchlist - Pending] ({len(watchlist_only_data)})")
+        print(f"{'Symbol':<8} {'Target($)':>12} {'Current($)':>12} {'Diff':>10} {'Units':>8} {'Status':>10}")
+        print("-" * 65)
 
-    for item, current_units, max_units, current, diff_pct in watchlist_data:
-        ticker = item['ticker']
-        target = item['target_price']
-        units_str = f"{current_units:.1f}/{max_units}"
+        for d in watchlist_only_data:
+            units_str = f"{d['units']:.1f}/{d['max_units']}"
 
-        if current > 0:
-            if ticker in positions:
-                pos = positions[ticker]
-                entry = pos.get('entry_price', 0)
-                stop_loss = pos.get('stop_loss_price', 0)
-                if entry > 0:
-                    diff_str = f"{diff_pct:+.2f}%"
-                    if current <= stop_loss:
-                        status_str = "<<STOP!"
-                    elif diff_pct <= -5:
-                        status_str = "WARNING"
-                    elif diff_pct > 0:
-                        status_str = "HOLD ▲"
-                    else:
-                        status_str = "HOLD ▼"
+            if d['is_expired']:
+                diff_str = "---"
+                status = "EXPIRED"
+            elif d['current'] > 0:
+                diff_str = f"{d['diff_pct']:+.2f}%"
+                if d['diff_pct'] <= 0:
+                    status = "BREAKOUT!"
+                elif d['diff_pct'] <= 1:
+                    status = "NEAR"
+                elif d['diff_pct'] <= 5:
+                    status = "CLOSE"
                 else:
-                    diff_str = "---"
-                    status_str = "HOLD"
+                    status = "WAIT"
             else:
-                diff_str = f"{diff_pct:+.2f}%"
-                if diff_pct <= 0:
-                    status_str = "BREAKOUT!"
-                elif diff_pct <= 1:
-                    status_str = "NEAR"
-                else:
-                    status_str = "WAIT"
+                diff_str = "---"
+                status = "LOADING"
 
-            print(f"{ticker:<8} {target:>12,.2f} {current:>12,.2f} {diff_str:>10} {units_str:>8} {status_str:>10}")
-        else:
-            print(f"{ticker:<8} {target:>12,.2f} {'---':>12} {'---':>10} {units_str:>8} {'LOADING':>10}")
+            if d['current'] > 0:
+                print(f"{d['ticker']:<8} {d['target']:>12,.2f} {d['current']:>12,.2f} {diff_str:>10} {units_str:>8} {status:>10}")
+            else:
+                print(f"{d['ticker']:<8} {d['target']:>12,.2f} {'---':>12} {diff_str:>10} {units_str:>8} {status:>10}")
 
-    print("-" * 75)
+        print("-" * 65)
 
-    # Holdings Stop Loss Monitor section
-    if positions:
-        stop_loss_pct = monitor.trading_settings.STOP_LOSS_PCT
-        print(f"\n[Holdings Stop Loss Monitor]")
-        print(f"{'Ticker':<8} {'Units':>6} {'ENTRY($)':>12} {'CURRENT($)':>12} {'P/L%':>10} {'STOP($)':>12} {'STATUS':>8}")
+    # ============================================================
+    # Section 3: Holdings Only (보유 중이지만 워치리스트에 없음)
+    # ============================================================
+    holdings_only_data = []
+    for symbol, pos in positions.items():
+        if symbol in watchlist_tickers:
+            continue  # 워치리스트에 있음 -> Section 1에서 처리됨
+
+        entry = pos.get('entry_price', 0)
+        stop_loss = pos.get('stop_loss_price', 0)
+        units = monitor.get_current_units_held(symbol)
+
+        price_data = prices.get(symbol, {})
+        current = price_data.get('last', 0)
+        if current <= 0:
+            current = holdings_prices.get(symbol, {}).get('last', 0)
+
+        pnl_pct = ((current - entry) / entry) * 100 if current > 0 and entry > 0 else -9999
+
+        holdings_only_data.append({
+            'symbol': symbol,
+            'entry': entry,
+            'current': current,
+            'stop_loss': stop_loss,
+            'pnl_pct': pnl_pct,
+            'units': units,
+        })
+
+    # Sort by P/L% descending
+    holdings_only_data.sort(key=lambda x: x['pnl_pct'], reverse=True)
+
+    if holdings_only_data:
+        print(f"\n[Holdings Only] ({len(holdings_only_data)})")
+        print(f"{'Ticker':<8} {'Units':>6} {'Entry($)':>12} {'Current($)':>12} {'P/L%':>10} {'Stop($)':>12} {'Status':>8}")
         print("-" * 82)
 
-        # Build list with P/L% for sorting
-        holdings_data = []
-        for symbol, pos in positions.items():
-            entry = pos.get('entry_price', 0)
-            stop_loss = pos.get('stop_loss_price', 0)
-            units = monitor.get_current_units_held(symbol)
+        for d in holdings_only_data:
+            units_str = f"{d['units']:.1f}"
+            if d['current'] > 0 and d['entry'] > 0:
+                pnl_str = f"{d['pnl_pct']:+.1f}%"
 
-            price_data = prices.get(symbol, {})
-            current = price_data.get('last', 0)
-            if current <= 0:
-                current = holdings_prices.get(symbol, {}).get('last', 0)
-
-            if current > 0 and entry > 0:
-                pnl_pct = ((current - entry) / entry) * 100
-            else:
-                pnl_pct = -9999  # Unknown at bottom
-
-            holdings_data.append((symbol, units, entry, current, pnl_pct, stop_loss))
-
-        # Sort by P/L% descending
-        holdings_data.sort(key=lambda x: x[4], reverse=True)
-
-        for symbol, units, entry, current, pnl_pct, stop_loss in holdings_data:
-            units_str = f"{units:.1f}"
-            if current > 0 and entry > 0:
-                pnl_str = f"{pnl_pct:+.1f}%"
-
-                if current <= stop_loss:
+                if d['current'] <= d['stop_loss']:
                     status = "STOP!"
-                elif pnl_pct <= -stop_loss_pct * 0.7:
+                elif d['pnl_pct'] <= -stop_loss_pct * 0.7:
                     status = "WARN"
                 else:
                     status = "OK"
 
-                print(f"{symbol:<8} {units_str:>6} {entry:>12,.2f} {current:>12,.2f} {pnl_str:>10} {stop_loss:>12,.2f} {status:>8}")
+                print(f"{d['symbol']:<8} {units_str:>6} {d['entry']:>12,.2f} {d['current']:>12,.2f} {pnl_str:>10} {d['stop_loss']:>12,.2f} {status:>8}")
             else:
-                print(f"{symbol:<8} {units_str:>6} {entry:>12,.2f} {'---':>12} {'---':>10} {stop_loss:>12,.2f} {'---':>8}")
+                print(f"{d['symbol']:<8} {units_str:>6} {d['entry']:>12,.2f} {'---':>12} {'---':>10} {d['stop_loss']:>12,.2f} {'---':>8}")
 
         print("-" * 82)
 
