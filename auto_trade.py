@@ -524,12 +524,8 @@ def show_live_status(monitor: MonitorService, prices: dict, holdings_prices: dic
         print("-" * 60)
 
     # Today's Trades (US ET)
-    from datetime import timedelta
     today_et = monitor._get_today_et()
-    yesterday_et = today_et - timedelta(days=1)
-
     display_trades_section("Today's Trades", monitor.daily_triggers, str(today_et))
-    display_trades_section("Yesterday's Trades", monitor.yesterday_triggers, str(yesterday_et))
 
     print("=" * 90)
 
