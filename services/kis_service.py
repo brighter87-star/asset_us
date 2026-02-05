@@ -321,7 +321,7 @@ class KISAPIClient:
         all_trades = []
         ctx_area_fk200 = ""
         ctx_area_nk200 = ""
-        max_pages = 20  # Safety limit to prevent infinite loop
+        max_pages = 100  # Increased from 20 to handle large trade volumes
         page = 0
 
         while page < max_pages:

@@ -153,6 +153,10 @@ def sync_trade_history_from_kis(
     """
     KIS API에서 해외주식 체결내역을 조회하여 account_trade_history 테이블에 동기화.
 
+    매도/매수를 분리 조회하여 pagination 문제 방지:
+    - 매도(01): 건수가 적어 pagination 문제 없음 (expired 판단에 중요)
+    - 매수(02): 건수가 많아도 expired 판단에는 영향 없음
+
     Args:
         conn: Database connection
         client: KIS API client
@@ -172,21 +176,37 @@ def sync_trade_history_from_kis(
         # 기본: 1년 전부터
         start_date = (date.today().replace(year=date.today().year - 1)).strftime("%Y%m%d")
 
-    # 모든 거래소에서 체결내역 조회 (exchange_code="%" 로 한번에)
     all_trades = []
+
+    # 1. 매도 먼저 조회 (01) - 건수 적음, expired 판단에 중요
     try:
-        trades = client.get_trade_history(
+        sells = client.get_trade_history(
             start_date=start_date,
             end_date=end_date,
-            exchange_code="%",  # All exchanges at once
+            exchange_code="%",
+            sll_buy_dvsn="01",  # 매도만
         )
-        for t in trades:
-            # 거래소 코드 추출 (ovrs_excg_cd 또는 기본값)
+        for t in sells:
             t["_exchange_code"] = t.get("ovrs_excg_cd", "NASD")
-        all_trades.extend(trades)
+        all_trades.extend(sells)
     except Exception as e:
         if "no data" not in str(e).lower():
-            print(f"  Warning: trade history fetch failed: {e}")
+            print(f"  Warning: sell history fetch failed: {e}")
+
+    # 2. 매수 조회 (02) - pagination 제한 있어도 expired 판단엔 영향 없음
+    try:
+        buys = client.get_trade_history(
+            start_date=start_date,
+            end_date=end_date,
+            exchange_code="%",
+            sll_buy_dvsn="02",  # 매수만
+        )
+        for t in buys:
+            t["_exchange_code"] = t.get("ovrs_excg_cd", "NASD")
+        all_trades.extend(buys)
+    except Exception as e:
+        if "no data" not in str(e).lower():
+            print(f"  Warning: buy history fetch failed: {e}")
 
     if not all_trades:
         print("  No trades found")
