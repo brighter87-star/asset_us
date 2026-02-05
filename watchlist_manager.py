@@ -11,7 +11,7 @@ Commands:
 
 import argparse
 import pandas as pd
-from datetime import date, datetime
+from datetime import date, datetime, timedelta
 from pathlib import Path
 from zoneinfo import ZoneInfo
 
@@ -22,16 +22,65 @@ ET = ZoneInfo("America/New_York")
 
 
 def get_today_et() -> date:
-    """Get today's date in US Eastern time (matches trade_date in DB)."""
-    return datetime.now(ET).date()
+    """
+    Get the date for the upcoming/current US market session.
+
+    Logic:
+    - Before 8 PM ET: current US date (market is open or will open today)
+    - After 8 PM ET: next US date (today's session ended, next is tomorrow)
+    """
+    now_et = datetime.now(ET)
+    if now_et.hour >= 20:  # After 8 PM ET, use tomorrow
+        return (now_et + timedelta(days=1)).date()
+    return now_et.date()
 
 
 def parse_date(date_str: str) -> date:
-    """Parse date string in YYYY-MM-DD format."""
-    try:
-        return datetime.strptime(date_str, "%Y-%m-%d").date()
-    except ValueError:
-        raise argparse.ArgumentTypeError(f"Invalid date format: {date_str}. Use YYYY-MM-DD.")
+    """
+    Parse date string in various formats.
+
+    Supported formats:
+    - YYYY-MM-DD, YYYY/MM/DD (full date)
+    - MM-DD, MM/DD, M/D, M-D (without year, assumes current year)
+    - MM.DD, M.D (dot separator)
+
+    Examples: 2026-02-05, 2/5, 02/05, 2.5, 02-05
+    """
+    date_str = date_str.strip()
+    current_year = datetime.now().year
+
+    # Try various formats
+    formats_with_year = [
+        "%Y-%m-%d",   # 2026-02-05
+        "%Y/%m/%d",   # 2026/02/05
+        "%Y.%m.%d",   # 2026.02.05
+    ]
+
+    formats_without_year = [
+        "%m-%d",      # 02-05
+        "%m/%d",      # 02/05
+        "%m.%d",      # 02.05
+    ]
+
+    # Try formats with year first
+    for fmt in formats_with_year:
+        try:
+            return datetime.strptime(date_str, fmt).date()
+        except ValueError:
+            continue
+
+    # Try formats without year
+    for fmt in formats_without_year:
+        try:
+            parsed = datetime.strptime(date_str, fmt)
+            return parsed.replace(year=current_year).date()
+        except ValueError:
+            continue
+
+    raise argparse.ArgumentTypeError(
+        f"Invalid date format: {date_str}. "
+        f"Use YYYY-MM-DD, MM/DD, M/D, MM.DD, etc."
+    )
 
 
 def load_watchlist() -> pd.DataFrame:

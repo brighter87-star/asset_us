@@ -639,19 +639,23 @@ def run_trading_loop():
                 show_live_status(monitor, prices, holdings_prices)
                 last_status_time = current_time
 
+            # Check for file changes (works regardless of market status)
+            if monitor.reload_if_changed():
+                print(f"[{now.strftime('%H:%M:%S')}] RELOADED: watchlist & settings")
+                print_settings(monitor)
+                # Subscribe new symbols to poller
+                new_tickers = [item['ticker'] for item in monitor.watchlist]
+                for pos in monitor.order_service.get_open_positions():
+                    if pos['symbol'] not in new_tickers:
+                        new_tickers.append(pos['symbol'])
+                poller.subscribe(new_tickers)
+
             # Check market status
             status = monitor.get_status()
 
             if status["market_open"]:
-                # Run monitoring cycle
+                # Run monitoring cycle (note: reload_if_changed already called above)
                 result = monitor.run_monitoring_cycle()
-
-                if result.get("reloaded"):
-                    print(f"[{now.strftime('%H:%M:%S')}] RELOADED: watchlist & settings")
-                    print_settings(monitor)
-                    # Subscribe new symbols to poller
-                    new_tickers = [item['ticker'] for item in monitor.watchlist]
-                    poller.subscribe(new_tickers)
 
                 if result["entries"]:
                     for entry in result["entries"]:

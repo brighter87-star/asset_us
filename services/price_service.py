@@ -5,7 +5,7 @@ REST API polling for real-time prices.
 
 import threading
 import time
-from datetime import datetime
+from datetime import datetime, time as dt_time
 from typing import Dict, List, Optional, Callable
 from zoneinfo import ZoneInfo
 
@@ -90,10 +90,26 @@ class RestPricePoller:
 
             time.sleep(self.interval)
 
+    def _is_daytime_trading_hours(self) -> bool:
+        """
+        Check if current time is US daytime trading hours (Korean 10:00~16:00).
+        During this time, we need to use BAQ/BAY/BAA exchange codes.
+        """
+        now_kst = datetime.now(KST)
+        daytime_start = dt_time(10, 0)
+        daytime_end = dt_time(16, 0)
+        return daytime_start <= now_kst.time() <= daytime_end
+
     def _poll_all_prices(self):
         """Poll prices for all subscribed stocks."""
-        # Try these exchanges in order
-        EXCHANGE_FALLBACK = ["NAS", "NYS", "AMS"]
+        # Exchange codes to try
+        # During Korean daytime hours (10:00~16:00), try daytime codes first
+        if self._is_daytime_trading_hours():
+            # Daytime trading codes (BAQ=NASDAQ, BAY=NYSE, BAA=AMEX)
+            EXCHANGE_FALLBACK = ["BAQ", "BAY", "BAA", "NAS", "NYS", "AMS"]
+        else:
+            # Regular/pre-market/after-market codes
+            EXCHANGE_FALLBACK = ["NAS", "NYS", "AMS"]
 
         for symbol in self.subscribed_stocks:
             if not self.running:
