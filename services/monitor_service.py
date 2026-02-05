@@ -807,6 +807,12 @@ class MonitorService:
         - AAPL doubles to $9,000 market value
         - current_units = $4,500 / $5,000 = 0.9 (not 1.8!)
         """
+        # First check: if not in open positions, return 0 immediately
+        # This is the source of truth for what we actually hold
+        positions = {pos["symbol"]: pos for pos in self.order_service.get_open_positions()}
+        if symbol not in positions:
+            return 0
+
         total_assets = self.get_total_assets()
         if total_assets <= 0:
             return 0
@@ -836,32 +842,12 @@ class MonitorService:
         except Exception as e:
             print(f"[WARN] Failed to get holdings for {symbol}: {e}")
 
-        # Fallback: check daily_lots for total_cost (only active/unclosed lots)
-        try:
-            from db.connection import get_connection
-            conn = get_connection()
-            with conn.cursor() as cur:
-                cur.execute("""
-                    SELECT SUM(total_cost) FROM daily_lots
-                    WHERE stock_code = %s AND net_quantity > 0 AND is_closed = FALSE
-                """, (symbol,))
-                row = cur.fetchone()
-                if row and row[0]:
-                    total_cost = float(row[0])
-                    return total_cost / unit_value
-            conn.close()
-        except Exception:
-            pass
-
-        # Fallback: check order_service positions
-        for pos in self.order_service.get_open_positions():
-            if pos["symbol"] == symbol:
-                qty = pos.get("quantity", 0)
-                entry_price = pos.get("entry_price", 0)
-                purchase_cost = qty * entry_price
-                return purchase_cost / unit_value if unit_value > 0 else 0
-
-        return 0
+        # Fallback: use position data directly
+        pos = positions[symbol]
+        qty = pos.get("quantity", 0)
+        entry_price = pos.get("entry_price", 0)
+        purchase_cost = qty * entry_price
+        return purchase_cost / unit_value if unit_value > 0 else 0
 
     def _should_log_skip(self, symbol: str) -> bool:
         """
