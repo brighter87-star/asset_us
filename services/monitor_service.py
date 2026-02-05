@@ -1378,35 +1378,43 @@ class MonitorService:
 
     def _periodic_holdings_refresh(self):
         """
-        Periodically refresh holdings from API (every 1 minute).
-        Only syncs today's data to minimize API load.
+        Periodically refresh holdings and trade history from API (every 1 minute).
+        Syncs last 3 days of trade history to catch any sells.
         """
         now = time_module.time()
         if now - self._last_holdings_refresh < self._holdings_refresh_interval:
             return False
 
         try:
-            from datetime import date
+            from datetime import date, timedelta
             from db.connection import get_connection
-            from services.data_sync_service import sync_holdings_from_kis
+            from services.data_sync_service import sync_holdings_from_kis, sync_trade_history_from_kis
 
             conn = get_connection()
             try:
-                # Only sync today's holdings (lightweight)
                 today = date.today()
+
+                # 1. Sync trade history (last 3 days) - captures sells!
+                start_date = (today - timedelta(days=3)).strftime("%Y%m%d")
+                trade_count = sync_trade_history_from_kis(conn, start_date=start_date)
+                if trade_count > 0:
+                    print(f"[REFRESH] Trade history synced: {trade_count} records")
+
+                # 2. Sync holdings
                 holdings_count = sync_holdings_from_kis(conn, snapshot_date=today)
                 if holdings_count > 0:
                     print(f"[REFRESH] Holdings synced: {holdings_count} records")
 
-                    # Refresh positions from DB
-                    self.order_service.sync_positions_from_db(
-                        stop_loss_pct=self.trading_settings.STOP_LOSS_PCT
-                    )
+                # 3. Refresh positions from DB
+                self.order_service.sync_positions_from_db(
+                    stop_loss_pct=self.trading_settings.STOP_LOSS_PCT
+                )
 
-                    # Invalidate caches
-                    self._total_assets = 0
-                    self._today_api_buys = None
-                    self._today_api_sells = None
+                # 4. Invalidate caches (including expired stocks!)
+                self._total_assets = 0
+                self._today_api_buys = None
+                self._today_api_sells = None
+                self._expired_stocks = None  # Re-check expired stocks after trade sync
             finally:
                 conn.close()
 
