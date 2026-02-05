@@ -471,26 +471,20 @@ def show_live_status(monitor: MonitorService, prices: dict, holdings_prices: dic
 
         print("-" * 82)
 
-    # Bot Trades Today section
-    bot_triggers = monitor.daily_triggers
-    if bot_triggers:
-        print(f"\n[Bot Trades Today] (US ET: {monitor._get_today_et()})")
-        print(f"{'Symbol':<8} {'Target($)':>10} {'Entry($)':>10} {'Current($)':>12} {'Return':>10} {'Status':>12}")
-        print("-" * 75)
+    # Helper function to display trades
+    def display_trades_section(title: str, triggers: dict, date_label: str):
+        if not triggers:
+            print(f"\n[{title}] ({date_label}) No trades")
+            return
 
-        stop_loss_pct = monitor.trading_settings.STOP_LOSS_PCT
+        print(f"\n[{title}] ({date_label})")
+        print(f"{'Symbol':<8} {'Entry($)':>10} {'Current($)':>12} {'Return':>10} {'Status':>12}")
+        print("-" * 60)
 
-        # Get sold symbols from API (for manual sells detection)
-        api_sells = monitor._load_today_api_sells()
-
-        # Build list for sorting
         trade_rows = []
-        for symbol, trigger_info in bot_triggers.items():
+        for symbol, trigger_info in triggers.items():
             entry_price = trigger_info.get('entry_price', 0)
-            is_sold = trigger_info.get('sold', False) or (symbol in api_sells)
-
-            watchlist_item = next((w for w in monitor.watchlist if w['ticker'] == symbol), None)
-            target = watchlist_item['target_price'] if watchlist_item else entry_price
+            is_sold = trigger_info.get('sold', False)
 
             price_data = prices.get(symbol, {})
             current = price_data.get('last', 0)
@@ -506,31 +500,36 @@ def show_live_status(monitor: MonitorService, prices: dict, holdings_prices: dic
                 elif return_pct <= -stop_loss_pct:
                     status = "STOP HIT!"
                 elif return_pct < 0:
-                    status = "HOLDING -"
+                    status = "HOLD -"
                 else:
-                    status = "HOLDING +"
+                    status = "HOLD +"
 
-                trade_rows.append((symbol, target, entry_price, current, return_pct, return_str, status))
+                trade_rows.append((symbol, entry_price, current, return_pct, return_str, status))
             else:
-                # No price available - check if sold via API
                 if is_sold:
-                    trade_rows.append((symbol, target, entry_price, 0, -999, "---", "SOLD"))
+                    trade_rows.append((symbol, entry_price, 0, -999, "---", "SOLD"))
                 else:
-                    trade_rows.append((symbol, target, entry_price, 0, -999, "---", "LOADING"))
+                    trade_rows.append((symbol, entry_price, 0, -999, "---", "LOADING"))
 
-        # Sort: status priority (SOLD first, then HOLDING+, HOLDING-, STOP HIT!, LOADING), then return desc
-        status_order = {"SOLD": 0, "HOLDING +": 1, "HOLDING -": 2, "STOP HIT!": 3, "LOADING": 4}
-        trade_rows.sort(key=lambda x: (status_order.get(x[6], 5), -x[4]))
+        # Sort by status then return
+        status_order = {"SOLD": 0, "HOLD +": 1, "HOLD -": 2, "STOP HIT!": 3, "LOADING": 4}
+        trade_rows.sort(key=lambda x: (status_order.get(x[5], 5), -x[3]))
 
-        for symbol, target, entry_price, current, return_pct, return_str, status in trade_rows:
+        for symbol, entry_price, current, return_pct, return_str, status in trade_rows:
             if current > 0:
-                print(f"{symbol:<8} {target:>10,.2f} {entry_price:>10,.2f} {current:>12,.2f} {return_str:>10} {status:>12}")
+                print(f"{symbol:<8} {entry_price:>10,.2f} {current:>12,.2f} {return_str:>10} {status:>12}")
             else:
-                print(f"{symbol:<8} {target:>10,.2f} {entry_price:>10,.2f} {'---':>12} {return_str:>10} {status:>12}")
+                print(f"{symbol:<8} {entry_price:>10,.2f} {'---':>12} {return_str:>10} {status:>12}")
 
-        print("-" * 75)
-    else:
-        print("\n[Bot Trades Today] No auto-executed trades yet")
+        print("-" * 60)
+
+    # Today's Trades (US ET)
+    from datetime import timedelta
+    today_et = monitor._get_today_et()
+    yesterday_et = today_et - timedelta(days=1)
+
+    display_trades_section("Today's Trades", monitor.daily_triggers, str(today_et))
+    display_trades_section("Yesterday's Trades", monitor.yesterday_triggers, str(yesterday_et))
 
     print("=" * 90)
 

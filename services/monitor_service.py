@@ -68,7 +68,8 @@ class MonitorService:
         self.client = KISAPIClient()
         self.order_service = OrderService(settings=self.trading_settings)
         self.watchlist: List[dict] = []
-        self.daily_triggers: Dict[str, dict] = {}  # Track triggered entries today
+        self.daily_triggers: Dict[str, dict] = {}  # Track triggered entries today (US ET)
+        self.yesterday_triggers: Dict[str, dict] = {}  # Track yesterday's entries (US ET)
         self._file_mtime: float = 0  # File modification time
         self._pre_market_reloaded: bool = False  # Track pre-market reload
         self._price_cache: Dict[str, dict] = {}  # Cache from poller
@@ -120,17 +121,24 @@ class MonitorService:
         Load daily triggers from both DB and JSON file.
         - DB: source of truth for completed/synced trades
         - JSON: backup for very recent trades (API sync delay)
+        - Loads both today and yesterday (US ET)
         """
+        from datetime import timedelta
+
         today_et = self._get_today_et()
+        yesterday_et = today_et - timedelta(days=1)
         self.daily_triggers = {}
 
         # 1. Load from JSON file first (catches recent trades not yet in DB)
         self._load_triggers_from_json(today_et)
 
-        # 2. Load from DB (source of truth, will add any missing)
+        # 2. Load today's trades from DB (US ET)
         self._load_today_trades_from_db(today_et)
 
-        # 3. Only log if changed or verbose
+        # 3. Load yesterday's trades from DB (US ET)
+        self._load_yesterday_trades_from_db(yesterday_et)
+
+        # 4. Only log if changed or verbose
         self._log_triggers_if_changed(verbose)
 
     def _load_triggers_from_json(self, today_et: date):
@@ -151,35 +159,28 @@ class MonitorService:
             print(f"[WARN] Failed to load from JSON: {e}")
 
     def _load_today_trades_from_db(self, today_et: date):
-        """Load today's trades from database and merge with existing triggers.
-
-        Note: Queries last 2 days to catch overnight trades
-        (e.g., if it's Feb 5 01:00 ET, Feb 4 market trades have trade_date=2026-02-04)
-        """
+        """Load today's trades (US ET) from database and merge with existing triggers."""
         try:
-            from datetime import timedelta
             from db.connection import get_connection
-
-            yesterday_et = today_et - timedelta(days=1)
 
             conn = get_connection()
             with conn.cursor() as cur:
-                # Get last 2 days buy trades (매수)
+                # Get today's buy trades only (US ET date)
                 cur.execute("""
                     SELECT stk_cd, cntr_uv, ord_tm
                     FROM account_trade_history
-                    WHERE trade_date >= %s AND io_tp_nm LIKE '%%매수%%'
+                    WHERE trade_date = %s AND io_tp_nm LIKE '%%매수%%'
                     ORDER BY ord_tm
-                """, (yesterday_et,))
+                """, (today_et,))
                 buys = cur.fetchall()
 
-                # Get last 2 days sell trades (매도) - for stop loss detection
+                # Get today's sell trades (US ET date)
                 cur.execute("""
                     SELECT stk_cd, cntr_uv, ord_tm
                     FROM account_trade_history
-                    WHERE trade_date >= %s AND io_tp_nm LIKE '%%매도%%'
+                    WHERE trade_date = %s AND io_tp_nm LIKE '%%매도%%'
                     ORDER BY ord_tm
-                """, (yesterday_et,))
+                """, (today_et,))
                 sells = cur.fetchall()
             conn.close()
 
@@ -199,10 +200,8 @@ class MonitorService:
                     db_trade_counts[stk_cd]["count"] += 1
 
             # Merge DB trades with existing triggers (from JSON)
-            db_added = 0
             for stk_cd, info in db_trade_counts.items():
                 if stk_cd not in self.daily_triggers:
-                    # New from DB
                     self.daily_triggers[stk_cd] = {
                         "entry_type": "db",
                         "entry_time": info["entry_time"],
@@ -210,9 +209,7 @@ class MonitorService:
                         "trigger_count": info["count"],
                         "sold": stk_cd in sold_symbols,
                     }
-                    db_added += 1
                 else:
-                    # Already exists (from JSON), update trigger_count to max
                     existing_count = self.daily_triggers[stk_cd].get("trigger_count", 1)
                     self.daily_triggers[stk_cd]["trigger_count"] = max(existing_count, info["count"])
 
@@ -222,22 +219,76 @@ class MonitorService:
                     self.daily_triggers[symbol]["sold"] = True
 
         except Exception as e:
-            print(f"[WARN] Failed to load trades from database: {e}")
-            import traceback
-            traceback.print_exc()
+            print(f"[WARN] Failed to load today's trades from database: {e}")
+
+    def _load_yesterday_trades_from_db(self, yesterday_et: date):
+        """Load yesterday's trades (US ET) from database into yesterday_triggers."""
+        try:
+            from db.connection import get_connection
+
+            self.yesterday_triggers = {}
+
+            conn = get_connection()
+            with conn.cursor() as cur:
+                # Get yesterday's buy trades (US ET date)
+                cur.execute("""
+                    SELECT stk_cd, cntr_uv, ord_tm
+                    FROM account_trade_history
+                    WHERE trade_date = %s AND io_tp_nm LIKE '%%매수%%'
+                    ORDER BY ord_tm
+                """, (yesterday_et,))
+                buys = cur.fetchall()
+
+                # Get yesterday's sell trades (US ET date)
+                cur.execute("""
+                    SELECT stk_cd, cntr_uv, ord_tm
+                    FROM account_trade_history
+                    WHERE trade_date = %s AND io_tp_nm LIKE '%%매도%%'
+                    ORDER BY ord_tm
+                """, (yesterday_et,))
+                sells = cur.fetchall()
+            conn.close()
+
+            sold_symbols = set(row[0] for row in sells)
+
+            for stk_cd, cntr_uv, ord_tm in buys:
+                if stk_cd not in self.yesterday_triggers:
+                    self.yesterday_triggers[stk_cd] = {
+                        "entry_type": "db",
+                        "entry_time": str(ord_tm) if ord_tm else "",
+                        "entry_price": float(cntr_uv) if cntr_uv else 0,
+                        "trigger_count": 1,
+                        "sold": stk_cd in sold_symbols,
+                    }
+                else:
+                    self.yesterday_triggers[stk_cd]["trigger_count"] += 1
+
+            for symbol in sold_symbols:
+                if symbol in self.yesterday_triggers:
+                    self.yesterday_triggers[symbol]["sold"] = True
+
+        except Exception as e:
+            print(f"[WARN] Failed to load yesterday's trades from database: {e}")
 
     def _log_triggers_if_changed(self, force: bool = False):
         """Log triggers only if changed since last log."""
-        # Create hash of current state
+        # Create hash of current state (today + yesterday)
         trigger_items = []
         for symbol, info in sorted(self.daily_triggers.items()):
             sold = "SOLD" if info.get("sold") else ""
-            trigger_items.append(f"{symbol}{sold}")
+            trigger_items.append(f"T:{symbol}{sold}")
+        for symbol, info in sorted(self.yesterday_triggers.items()):
+            sold = "SOLD" if info.get("sold") else ""
+            trigger_items.append(f"Y:{symbol}{sold}")
         current_hash = ",".join(trigger_items)
 
         # Only log if changed or forced
         if force or current_hash != self._last_triggers_hash:
             self._last_triggers_hash = current_hash
+
+            today_et = self._get_today_et()
+
+            # Log today's trades
             if self.daily_triggers:
                 parts = []
                 for symbol, info in sorted(self.daily_triggers.items()):
@@ -245,9 +296,21 @@ class MonitorService:
                         parts.append(f"{symbol}(SOLD)")
                     else:
                         parts.append(symbol)
-                print(f"[TRIGGERS] Today's trades: {', '.join(parts)}")
+                print(f"[TRIGGERS] Today ({today_et}): {', '.join(parts)}")
             else:
-                print("[TRIGGERS] No trades today")
+                print(f"[TRIGGERS] Today ({today_et}): No trades")
+
+            # Log yesterday's trades
+            if self.yesterday_triggers:
+                from datetime import timedelta
+                yesterday_et = today_et - timedelta(days=1)
+                parts = []
+                for symbol, info in sorted(self.yesterday_triggers.items()):
+                    if info.get("sold"):
+                        parts.append(f"{symbol}(SOLD)")
+                    else:
+                        parts.append(symbol)
+                print(f"[TRIGGERS] Yesterday ({yesterday_et}): {', '.join(parts)}")
 
     def _merge_api_buys_to_triggers(self):
         """
@@ -288,30 +351,22 @@ class MonitorService:
 
     def _load_today_api_buys(self) -> set:
         """
-        Load today's buy orders directly from KIS API.
+        Load today's (US ET) buy orders directly from KIS API.
         Most reliable source - doesn't depend on DB sync.
         Cached to avoid repeated API calls within same session.
-
-        Note: Queries last 2 days to catch trades from overnight session
-        (e.g., if it's Feb 5 01:00 ET, Feb 4 market trades have ord_dt=20260204)
         """
         if self._today_api_buys is not None:
             return self._today_api_buys
 
-        from datetime import timedelta
         today_et = self._get_today_et()
-        yesterday_et = today_et - timedelta(days=1)
-
-        # Query last 2 days to catch overnight trades
-        start_str = yesterday_et.strftime("%Y%m%d")
-        end_str = today_et.strftime("%Y%m%d")
+        date_str = today_et.strftime("%Y%m%d")
         bought_symbols = set()
 
         try:
             # sll_buy_dvsn: 02 = 매수만
             trades = self.client.get_trade_history(
-                start_date=start_str,
-                end_date=end_str,
+                start_date=date_str,
+                end_date=date_str,
                 exchange_code="%",
                 sll_buy_dvsn="02",  # 매수만
             )
@@ -321,7 +376,7 @@ class MonitorService:
                     bought_symbols.add(symbol)
 
             if bought_symbols:
-                print(f"[API] Recent buys from KIS API ({start_str}~{end_str}): {sorted(bought_symbols)}")
+                print(f"[API] Today's buys ({today_et}): {sorted(bought_symbols)}")
 
             self._today_api_buys = bought_symbols
         except Exception as e:
@@ -332,27 +387,22 @@ class MonitorService:
 
     def _load_today_api_sells(self) -> set:
         """
-        Load today's sell orders directly from KIS API.
+        Load today's (US ET) sell orders directly from KIS API.
         Used to detect manual stop-loss sells.
         Cached to avoid repeated API calls within same session.
         """
         if self._today_api_sells is not None:
             return self._today_api_sells
 
-        from datetime import timedelta
         today_et = self._get_today_et()
-        yesterday_et = today_et - timedelta(days=1)
-
-        # Query last 2 days to catch overnight trades
-        start_str = yesterday_et.strftime("%Y%m%d")
-        end_str = today_et.strftime("%Y%m%d")
+        date_str = today_et.strftime("%Y%m%d")
         sold_symbols = set()
 
         try:
             # sll_buy_dvsn: 01 = 매도만
             trades = self.client.get_trade_history(
-                start_date=start_str,
-                end_date=end_str,
+                start_date=date_str,
+                end_date=date_str,
                 exchange_code="%",
                 sll_buy_dvsn="01",  # 매도만
             )
@@ -362,7 +412,7 @@ class MonitorService:
                     sold_symbols.add(symbol)
 
             if sold_symbols:
-                print(f"[API] Recent sells from KIS API ({start_str}~{end_str}): {sorted(sold_symbols)}")
+                print(f"[API] Today's sells ({today_et}): {sorted(sold_symbols)}")
 
             self._today_api_sells = sold_symbols
         except Exception as e:
