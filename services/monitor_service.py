@@ -6,7 +6,7 @@ import json
 import os
 import time as time_module
 import pandas as pd
-from datetime import datetime, date, time
+from datetime import datetime, date, time, timedelta
 from pathlib import Path
 from typing import Dict, List, Optional
 from zoneinfo import ZoneInfo
@@ -115,8 +115,19 @@ class MonitorService:
             print(f"[WARN] Startup sync failed: {e}")
 
     def _get_today_et(self) -> date:
-        """Get today's date in US Eastern time."""
-        return datetime.now(ET).date()
+        """
+        Get the date for the current/upcoming US market session.
+
+        Logic:
+        - Before 8 PM ET: current US date (market is open or will open today)
+        - After 8 PM ET: next US date (today's session ended, next is tomorrow)
+
+        This matches watchlist_manager.get_today_et() for consistency.
+        """
+        now_et = datetime.now(ET)
+        if now_et.hour >= 20:  # After 8 PM ET, use tomorrow
+            return (now_et + timedelta(days=1)).date()
+        return now_et.date()
 
     def _load_daily_triggers(self, verbose: bool = False):
         """
@@ -125,8 +136,6 @@ class MonitorService:
         - JSON: backup for very recent trades (API sync delay)
         - Loads both today and yesterday (US ET)
         """
-        from datetime import timedelta
-
         today_et = self._get_today_et()
         yesterday_et = today_et - timedelta(days=1)
         self.daily_triggers = {}
