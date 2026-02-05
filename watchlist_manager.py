@@ -4,9 +4,17 @@ Watchlist Manager - Add/remove items from watchlist with auto-dating.
 Commands:
     add      - Add item to watchlist
     remove   - Remove item from watchlist
-    update   - Update existing item
+    update   - Update existing item (shows before/after changes)
+    get      - Get details of a specific item
     list     - List all items
     cleanup  - Remove stocks that have been stopped out (sold after added_date)
+
+Examples:
+    python watchlist_manager.py add AAPL 180.00 --max-units 2
+    python watchlist_manager.py update AAPL 185.00
+    python watchlist_manager.py update AAPL --date 2/6
+    python watchlist_manager.py get AAPL
+    python watchlist_manager.py list
 """
 
 import argparse
@@ -145,27 +153,78 @@ def update_item(ticker: str, target_price: float = None, max_units: int = None, 
         return
 
     idx = df[df["ticker"] == ticker].index[0]
+    old_row = df.loc[idx].copy()
 
     # Determine date to use
     if specific_date:
         new_date = specific_date
-    elif reset_date:
+    elif reset_date and target_price is not None:
         new_date = get_today_et()
     else:
         new_date = None
 
+    # Track changes
+    changes = []
+
     if target_price is not None:
+        old_val = old_row["target_price"]
         df.loc[idx, "target_price"] = target_price
+        changes.append(f"target: ${old_val:.2f} → ${target_price:.2f}")
         if new_date:
+            old_date = old_row.get("added_date", "N/A")
             df.loc[idx, "added_date"] = str(new_date)
+            changes.append(f"added_date: {old_date} → {new_date}")
+
     if max_units is not None:
+        old_val = int(old_row.get("max_units", 1)) if pd.notna(old_row.get("max_units")) else 1
         df.loc[idx, "max_units"] = max_units
+        changes.append(f"max_units: {old_val} → {max_units}")
+
     if stop_loss_pct is not None:
+        old_val = old_row.get("stop_loss_pct")
+        old_str = f"{old_val}%" if pd.notna(old_val) and old_val != "" else "default"
         df.loc[idx, "stop_loss_pct"] = stop_loss_pct
+        changes.append(f"stop_loss: {old_str} → {stop_loss_pct}%")
+
+    if specific_date and target_price is None:
+        # Date-only update
+        old_date = old_row.get("added_date", "N/A")
+        df.loc[idx, "added_date"] = str(specific_date)
+        changes.append(f"added_date: {old_date} → {specific_date}")
+
+    if not changes:
+        print(f"[WARN] No changes specified for {ticker}")
+        print(f"  Current: target=${old_row['target_price']:.2f}, max_units={int(old_row.get('max_units', 1))}, added={old_row.get('added_date', 'N/A')}")
+        return
 
     save_watchlist(df)
-    date_str = str(new_date) if new_date else "(unchanged)"
-    print(f"[OK] Updated {ticker} @ ${target_price:.2f} (date={date_str})")
+    print(f"[OK] Updated {ticker}")
+    for change in changes:
+        print(f"  {change}")
+
+
+def get_item(ticker: str):
+    """Get details of a specific item in watchlist."""
+    df = load_watchlist()
+    ticker = ticker.upper()
+
+    if ticker not in df["ticker"].values:
+        print(f"[NOT FOUND] {ticker} is not in watchlist")
+        return
+
+    row = df[df["ticker"] == ticker].iloc[0]
+
+    print(f"[FOUND] {ticker}")
+    print(f"  - Target price: ${row['target_price']:.2f}")
+    max_units = int(row.get("max_units", 1)) if pd.notna(row.get("max_units")) else 1
+    print(f"  - Max units: {max_units}")
+    sl = row.get("stop_loss_pct")
+    if pd.notna(sl) and sl != "":
+        print(f"  - Stop loss: {sl}%")
+    else:
+        print(f"  - Stop loss: default")
+    added = row.get("added_date", "N/A")
+    print(f"  - Added: {added if pd.notna(added) and added != '' else 'N/A'}")
 
 
 def list_items():
@@ -315,14 +374,18 @@ def main():
     # update command
     update_parser = subparsers.add_parser("update", help="Update item in watchlist (resets added_date to today US ET)")
     update_parser.add_argument("ticker", type=str, help="Stock ticker")
-    update_parser.add_argument("target_price", type=float, help="New target price")
+    update_parser.add_argument("target_price", type=float, nargs="?", help="New target price")
     update_parser.add_argument("--max-units", type=int, help="New max units")
     update_parser.add_argument("--stop-loss", type=float, help="New stop loss %")
-    update_parser.add_argument("--date", type=parse_date, help="Set specific date (YYYY-MM-DD)")
+    update_parser.add_argument("--date", "-d", type=parse_date, help="Set specific date (e.g., 2/6, 02-06, 2026-02-06)")
     update_parser.add_argument("--no-date-reset", action="store_true", help="Don't reset added_date")
 
     # list command
     subparsers.add_parser("list", help="List all items in watchlist")
+
+    # get command
+    get_parser = subparsers.add_parser("get", help="Get details of a specific item")
+    get_parser.add_argument("ticker", type=str, help="Stock ticker")
 
     # cleanup command
     cleanup_parser = subparsers.add_parser("cleanup", help="Remove stopped-out stocks (sold after added_date)")
@@ -339,6 +402,8 @@ def main():
                     reset_date=not args.no_date_reset, specific_date=args.date)
     elif args.command == "list":
         list_items()
+    elif args.command == "get":
+        get_item(args.ticker)
     elif args.command == "cleanup":
         cleanup_stopped_out(dry_run=not args.execute)
     else:
