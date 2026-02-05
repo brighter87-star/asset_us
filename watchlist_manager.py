@@ -13,8 +13,17 @@ import argparse
 import pandas as pd
 from datetime import date, datetime
 from pathlib import Path
+from zoneinfo import ZoneInfo
 
 WATCHLIST_PATH = Path(__file__).parent / "watchlist.csv"
+
+# US Eastern timezone for consistent date handling with trade records
+ET = ZoneInfo("America/New_York")
+
+
+def get_today_et() -> date:
+    """Get today's date in US Eastern time (matches trade_date in DB)."""
+    return datetime.now(ET).date()
 
 
 def parse_date(date_str: str) -> date:
@@ -47,8 +56,8 @@ def add_item(ticker: str, target_price: float, max_units: int = 1, stop_loss_pct
         print(f"[WARN] {ticker} already in watchlist. Use 'update' to modify.")
         return
 
-    # Use provided date or today
-    add_date = added_date if added_date else date.today()
+    # Use provided date or today (US Eastern time)
+    add_date = added_date if added_date else get_today_et()
 
     new_row = {
         "ticker": ticker,
@@ -77,8 +86,8 @@ def remove_item(ticker: str):
     print(f"[OK] Removed {ticker} from watchlist")
 
 
-def update_item(ticker: str, target_price: float = None, max_units: int = None, stop_loss_pct: float = None, reset_date: bool = True):
-    """Update existing item in watchlist. Resets added_date to today when target_price is updated."""
+def update_item(ticker: str, target_price: float = None, max_units: int = None, stop_loss_pct: float = None, reset_date: bool = True, specific_date: date = None):
+    """Update existing item in watchlist. Resets added_date to today (US ET) when target_price is updated."""
     df = load_watchlist()
     ticker = ticker.upper()
 
@@ -88,19 +97,26 @@ def update_item(ticker: str, target_price: float = None, max_units: int = None, 
 
     idx = df[df["ticker"] == ticker].index[0]
 
+    # Determine date to use
+    if specific_date:
+        new_date = specific_date
+    elif reset_date:
+        new_date = get_today_et()
+    else:
+        new_date = None
+
     if target_price is not None:
         df.loc[idx, "target_price"] = target_price
-        # Reset added_date to today when target price is updated
-        if reset_date:
-            df.loc[idx, "added_date"] = str(date.today())
+        if new_date:
+            df.loc[idx, "added_date"] = str(new_date)
     if max_units is not None:
         df.loc[idx, "max_units"] = max_units
     if stop_loss_pct is not None:
         df.loc[idx, "stop_loss_pct"] = stop_loss_pct
 
     save_watchlist(df)
-    today_str = str(date.today())
-    print(f"[OK] Updated {ticker} @ ${target_price:.2f} (date={today_str})")
+    date_str = str(new_date) if new_date else "(unchanged)"
+    print(f"[OK] Updated {ticker} @ ${target_price:.2f} (date={date_str})")
 
 
 def list_items():
@@ -248,12 +264,13 @@ def main():
     remove_parser.add_argument("ticker", type=str, help="Stock ticker")
 
     # update command
-    update_parser = subparsers.add_parser("update", help="Update item in watchlist (resets added_date to today)")
+    update_parser = subparsers.add_parser("update", help="Update item in watchlist (resets added_date to today US ET)")
     update_parser.add_argument("ticker", type=str, help="Stock ticker")
     update_parser.add_argument("target_price", type=float, help="New target price")
     update_parser.add_argument("--max-units", type=int, help="New max units")
     update_parser.add_argument("--stop-loss", type=float, help="New stop loss %")
-    update_parser.add_argument("--no-date-reset", action="store_true", help="Don't reset added_date to today")
+    update_parser.add_argument("--date", type=parse_date, help="Set specific date (YYYY-MM-DD)")
+    update_parser.add_argument("--no-date-reset", action="store_true", help="Don't reset added_date")
 
     # list command
     subparsers.add_parser("list", help="List all items in watchlist")
@@ -269,7 +286,8 @@ def main():
     elif args.command == "remove":
         remove_item(args.ticker)
     elif args.command == "update":
-        update_item(args.ticker, args.target_price, args.max_units, args.stop_loss, reset_date=not args.no_date_reset)
+        update_item(args.ticker, args.target_price, args.max_units, args.stop_loss,
+                    reset_date=not args.no_date_reset, specific_date=args.date)
     elif args.command == "list":
         list_items()
     elif args.command == "cleanup":
