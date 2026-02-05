@@ -351,7 +351,12 @@ def show_live_status(monitor: MonitorService, prices: dict, holdings_prices: dic
             continue  # 보유 중 -> Section 1에서 처리됨
 
         max_units = item.get('max_units', 1)
-        current_units = monitor.get_current_units_held(ticker)
+
+        # 당일 매도된 종목은 units를 0으로 처리 (DB가 아직 업데이트 안됐을 수 있음)
+        if ticker in today_sells:
+            current_units = 0.0
+        else:
+            current_units = monitor.get_current_units_held(ticker)
 
         # 이미 max_units 채웠으면 스킵 (actionable 아님)
         if current_units >= max_units:
