@@ -885,18 +885,17 @@ class MonitorService:
 
         # Get PURCHASE COST from holdings (not market value)
         try:
-            from datetime import date
             from db.connection import get_connection
-            today = date.today()
             conn = get_connection()
             with conn.cursor() as cur:
+                # Use most recent snapshot_date (handles KST/ET timezone mismatch)
                 # Use pur_amt (purchase amount) instead of evlt_amt (evaluation amount)
-                # Filter by today's date AND rmnd_qty > 0 (actually holding shares)
                 cur.execute("""
                     SELECT pur_amt, rmnd_qty FROM holdings
-                    WHERE stk_cd = %s AND snapshot_date = %s AND rmnd_qty > 0
+                    WHERE stk_cd = %s AND rmnd_qty > 0
+                    ORDER BY snapshot_date DESC
                     LIMIT 1
-                """, (symbol, today))
+                """, (symbol,))
                 row = cur.fetchone()
                 if row and row[0] and row[1] > 0:
                     purchase_cost = float(row[0])

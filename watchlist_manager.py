@@ -124,9 +124,21 @@ def add_item(ticker: str, target_price: float, max_units: int = 1, stop_loss_pct
     df = load_watchlist()
     ticker = ticker.upper()
 
-    # Check if already exists
+    # Check if already exists - show current settings if duplicate
     if ticker in df["ticker"].values:
+        existing = df[df["ticker"] == ticker].iloc[0]
         print(f"[WARN] {ticker} already in watchlist. Use 'update' to modify.")
+        print(f"  Current settings:")
+        print(f"    - Target price: ${existing['target_price']:.2f}")
+        max_units = int(existing.get('max_units', 1)) if pd.notna(existing.get('max_units')) else 1
+        print(f"    - Max units: {max_units}")
+        sl = existing.get('stop_loss_pct')
+        if pd.notna(sl) and sl != "":
+            print(f"    - Stop loss: {sl}%")
+        else:
+            print(f"    - Stop loss: default")
+        added = existing.get('added_date', 'N/A')
+        print(f"    - Added: {added if pd.notna(added) and added != '' else 'N/A'}")
         return
 
     # Use provided date or today (US Eastern time)

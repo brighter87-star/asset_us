@@ -101,14 +101,22 @@ class OrderService:
         Returns:
             synced count
         """
-        from datetime import date
         from db.connection import get_connection
 
         try:
             conn = get_connection()
-            today = date.today()
 
+            # Use most recent snapshot_date (handles KST/ET timezone mismatch)
             with conn.cursor() as cur:
+                cur.execute("SELECT MAX(snapshot_date) FROM holdings WHERE rmnd_qty > 0")
+                result = cur.fetchone()
+                snapshot_date = result[0] if result and result[0] else None
+
+                if not snapshot_date:
+                    print("[WARN] No holdings data found in DB")
+                    conn.close()
+                    return 0
+
                 cur.execute("""
                     SELECT
                         stk_cd as stock_code,
@@ -123,7 +131,7 @@ class OrderService:
                     FROM holdings
                     WHERE snapshot_date = %s AND rmnd_qty > 0
                     GROUP BY stk_cd, crd_class
-                """, (today,))
+                """, (snapshot_date,))
                 rows = cur.fetchall()
 
             conn.close()
@@ -268,8 +276,9 @@ class OrderService:
         """
         reason = "initial_entry" if is_initial else "pyramid"
 
-        # Try with increasing buffer: 0.5% -> 1.0%
-        buffer_levels = [0.5, 1.0]
+        # Use configured buffer as base, then scale up for retry
+        base_buffer = getattr(self.settings, 'PRICE_BUFFER_PCT', 1.0)
+        buffer_levels = [base_buffer, base_buffer * 2]
 
         for buffer_pct in buffer_levels:
             buy_price = self.add_price_buffer(target_price, buffer_pct)
