@@ -3,7 +3,7 @@ Data synchronization service for overseas stocks.
 Syncs data from Korea Investment & Securities API to asset_us database.
 """
 
-from datetime import date
+from datetime import date, timedelta
 from typing import Optional, List, Dict, Any
 
 import pymysql
@@ -144,45 +144,29 @@ def sync_holdings_from_kis(
     return count
 
 
-def sync_trade_history_from_kis(
+def _sync_single_day_trades(
     conn: pymysql.connections.Connection,
-    client: Optional[KISAPIClient] = None,
-    start_date: Optional[str] = None,
-    end_date: Optional[str] = None,
+    client: KISAPIClient,
+    query_date: str,
 ) -> int:
     """
-    KIS API에서 해외주식 체결내역을 조회하여 account_trade_history 테이블에 동기화.
-
-    매도/매수를 분리 조회하여 pagination 문제 방지:
-    - 매도(01): 건수가 적어 pagination 문제 없음 (expired 판단에 중요)
-    - 매수(02): 건수가 많아도 expired 판단에는 영향 없음
+    KIS API에서 단일 날짜의 체결내역을 조회하여 DB에 저장.
 
     Args:
         conn: Database connection
         client: KIS API client
-        start_date: Start date (YYYYMMDD)
-        end_date: End date (YYYYMMDD)
+        query_date: Date to query (YYYYMMDD)
 
     Returns:
-        Number of trades synced
+        Number of trades synced for this day
     """
-    if client is None:
-        client = KISAPIClient()
-
-    if end_date is None:
-        end_date = date.today().strftime("%Y%m%d")
-
-    if start_date is None:
-        # 기본: 1년 전부터
-        start_date = (date.today().replace(year=date.today().year - 1)).strftime("%Y%m%d")
-
     all_trades = []
 
-    # 1. 매도 먼저 조회 (01) - 건수 적음, expired 판단에 중요
+    # 1. 매도 조회 (01)
     try:
         sells = client.get_trade_history(
-            start_date=start_date,
-            end_date=end_date,
+            start_date=query_date,
+            end_date=query_date,
             exchange_code="%",
             sll_buy_dvsn="01",  # 매도만
         )
@@ -191,13 +175,13 @@ def sync_trade_history_from_kis(
         all_trades.extend(sells)
     except Exception as e:
         if "no data" not in str(e).lower():
-            print(f"  Warning: sell history fetch failed: {e}")
+            print(f"    Warning: sell history fetch failed for {query_date}: {e}")
 
-    # 2. 매수 조회 (02) - pagination 제한 있어도 expired 판단엔 영향 없음
+    # 2. 매수 조회 (02)
     try:
         buys = client.get_trade_history(
-            start_date=start_date,
-            end_date=end_date,
+            start_date=query_date,
+            end_date=query_date,
             exchange_code="%",
             sll_buy_dvsn="02",  # 매수만
         )
@@ -206,10 +190,9 @@ def sync_trade_history_from_kis(
         all_trades.extend(buys)
     except Exception as e:
         if "no data" not in str(e).lower():
-            print(f"  Warning: buy history fetch failed: {e}")
+            print(f"    Warning: buy history fetch failed for {query_date}: {e}")
 
     if not all_trades:
-        print("  No trades found")
         return 0
 
     # INSERT IGNORE로 중복 방지
@@ -244,9 +227,9 @@ def sync_trade_history_from_kis(
             # 거래일자 파싱
             ord_dt = t.get("ord_dt", "")
             if ord_dt and len(ord_dt) == 8:
-                trade_date = f"{ord_dt[:4]}-{ord_dt[4:6]}-{ord_dt[6:8]}"
+                trade_date_str = f"{ord_dt[:4]}-{ord_dt[4:6]}-{ord_dt[6:8]}"
             else:
-                trade_date = None
+                trade_date_str = None
 
             exchange_code = t.get("_exchange_code", "NASD")
             currency = EXCHANGE_CURRENCY_MAP.get(exchange_code, "USD")
@@ -259,7 +242,7 @@ def sync_trade_history_from_kis(
                     t.get("prdt_name", ""),  # 종목명
                     io_tp_nm,
                     "CASH",  # 해외주식은 대부분 현금거래
-                    trade_date,
+                    trade_date_str,
                     t.get("ord_tmd", ""),  # 주문시간
                     qty,
                     float(t.get("ft_ccld_unpr3", 0) or t.get("ccld_pric", 0) or 0),  # 체결단가
@@ -272,6 +255,96 @@ def sync_trade_history_from_kis(
 
     conn.commit()
     return count
+
+
+def sync_trade_history_from_kis(
+    conn: pymysql.connections.Connection,
+    client: Optional[KISAPIClient] = None,
+    start_date: Optional[str] = None,
+    end_date: Optional[str] = None,
+) -> int:
+    """
+    KIS API에서 해외주식 체결내역을 조회하여 account_trade_history 테이블에 동기화.
+
+    하루씩 조회하여 pagination 문제 방지:
+    - 긴 기간을 한번에 조회하면 100페이지 제한에 걸려 일부 데이터만 가져옴
+    - 하루씩 조회하면 페이지네이션 문제 없이 모든 데이터를 가져올 수 있음
+
+    Args:
+        conn: Database connection
+        client: KIS API client
+        start_date: Start date (YYYYMMDD)
+        end_date: End date (YYYYMMDD)
+
+    Returns:
+        Number of trades synced
+    """
+    if client is None:
+        client = KISAPIClient()
+
+    if end_date is None:
+        end_date = date.today().strftime("%Y%m%d")
+
+    if start_date is None:
+        # 기본: 1년 전부터
+        start_date = (date.today().replace(year=date.today().year - 1)).strftime("%Y%m%d")
+
+    # Parse dates
+    start_dt = date(int(start_date[:4]), int(start_date[4:6]), int(start_date[6:8]))
+    end_dt = date(int(end_date[:4]), int(end_date[4:6]), int(end_date[6:8]))
+
+    total_count = 0
+    current_dt = start_dt
+
+    # Iterate day by day
+    while current_dt <= end_dt:
+        query_date = current_dt.strftime("%Y%m%d")
+        day_count = _sync_single_day_trades(conn, client, query_date)
+
+        if day_count > 0:
+            print(f"    {current_dt}: {day_count} trades")
+        total_count += day_count
+
+        current_dt += timedelta(days=1)
+
+    return total_count
+
+
+def rebuild_trade_history(start_date: str = "20260201") -> int:
+    """
+    거래내역 테이블을 처음부터 새로 구성.
+    기존 데이터를 삭제하고 지정된 날짜부터 오늘까지 하루씩 조회하여 동기화.
+
+    Args:
+        start_date: 시작 날짜 (YYYYMMDD, 기본: 20260201)
+
+    Returns:
+        Number of trades synced
+    """
+    conn = get_connection()
+    client = KISAPIClient()
+
+    try:
+        # 1. 기존 데이터 삭제
+        print("[1] Clearing existing trade history...")
+        with conn.cursor() as cur:
+            cur.execute("DELETE FROM account_trade_history")
+            deleted = cur.rowcount
+        conn.commit()
+        print(f"    Deleted {deleted} existing records")
+
+        # 2. 하루씩 동기화
+        print(f"\n[2] Syncing trade history from {start_date}...")
+        count = sync_trade_history_from_kis(conn, client, start_date)
+        print(f"\n[OK] Total {count} trades synced")
+
+        return count
+
+    except Exception as e:
+        print(f"[ERROR] Rebuild failed: {e}")
+        raise
+    finally:
+        conn.close()
 
 
 def sync_account_summary_from_kis(
@@ -368,5 +441,159 @@ def sync_all(
         conn.close()
 
 
+def rebuild_all_data(trade_start_date: str = "20260201", clear_derived: bool = True) -> dict:
+    """
+    전체 거래 관련 DB를 처음부터 재구성.
+
+    1단계: 거래내역(account_trade_history) - KIS API에서 하루씩 조회
+    2단계: 파생 테이블 초기화 (daily_lots, portfolio_snapshot, daily_portfolio_snapshot)
+    3단계: 보유종목(holdings) - 오늘 날짜로 동기화
+    4단계: 계좌요약(account_summary) - holdings에서 집계
+
+    Args:
+        trade_start_date: 거래내역 조회 시작일 (YYYYMMDD, 기본: 20260201)
+        clear_derived: 파생 테이블 초기화 여부 (기본: True)
+
+    Returns:
+        dict: 각 단계별 처리 결과
+    """
+    conn = get_connection()
+    client = KISAPIClient()
+    results = {}
+
+    try:
+        print("=" * 60)
+        print("  DB 전체 재구성 시작")
+        print("=" * 60)
+
+        # ============================================================
+        # 1단계: 거래내역 재구성
+        # ============================================================
+        print("\n[1/4] 거래내역(account_trade_history) 재구성...")
+        with conn.cursor() as cur:
+            cur.execute("DELETE FROM account_trade_history")
+            deleted = cur.rowcount
+        conn.commit()
+        print(f"      기존 데이터 삭제: {deleted}건")
+
+        trades_count = sync_trade_history_from_kis(conn, client, trade_start_date)
+        results["trade_history"] = trades_count
+        print(f"      새로 동기화: {trades_count}건")
+
+        # ============================================================
+        # 2단계: 파생 테이블 초기화
+        # ============================================================
+        if clear_derived:
+            print("\n[2/4] 파생 테이블 초기화...")
+            derived_tables = ["daily_lots", "portfolio_snapshot", "daily_portfolio_snapshot"]
+            for table in derived_tables:
+                with conn.cursor() as cur:
+                    cur.execute(f"DELETE FROM {table}")
+                    deleted = cur.rowcount
+                conn.commit()
+                print(f"      {table}: {deleted}건 삭제")
+                results[f"cleared_{table}"] = deleted
+        else:
+            print("\n[2/4] 파생 테이블 초기화 건너뜀")
+
+        # ============================================================
+        # 3단계: 보유종목 동기화
+        # ============================================================
+        print("\n[3/4] 보유종목(holdings) 동기화...")
+        # 기존 holdings 삭제 (오늘 날짜만)
+        today = date.today()
+        with conn.cursor() as cur:
+            cur.execute("DELETE FROM holdings WHERE snapshot_date = %s", (today,))
+            deleted = cur.rowcount
+        conn.commit()
+        print(f"      오늘({today}) 기존 데이터 삭제: {deleted}건")
+
+        holdings_count = sync_holdings_from_kis(conn, client, today)
+        results["holdings"] = holdings_count
+        print(f"      새로 동기화: {holdings_count}건")
+
+        # ============================================================
+        # 4단계: 계좌요약 재계산
+        # ============================================================
+        print("\n[4/4] 계좌요약(account_summary) 재계산...")
+        summary_count = sync_account_summary_from_kis(conn, client, today)
+        results["account_summary"] = summary_count
+        print(f"      동기화 완료: {summary_count}건")
+
+        # ============================================================
+        # 완료 요약
+        # ============================================================
+        print("\n" + "=" * 60)
+        print("  DB 재구성 완료!")
+        print("=" * 60)
+        print(f"  - 거래내역: {trades_count}건")
+        print(f"  - 보유종목: {holdings_count}건")
+        print(f"  - 계좌요약: {summary_count}건")
+        if clear_derived:
+            print(f"  - 파생테이블: 초기화됨 (daily_lots, portfolio_snapshot, daily_portfolio_snapshot)")
+        print("=" * 60)
+
+        return results
+
+    except Exception as e:
+        print(f"\n[ERROR] DB 재구성 실패: {e}")
+        raise
+    finally:
+        conn.close()
+
+
+def show_db_status():
+    """현재 DB 상태 출력."""
+    conn = get_connection()
+
+    try:
+        print("\n" + "=" * 60)
+        print("  현재 DB 상태")
+        print("=" * 60)
+
+        # 테이블명, 설명, 날짜컬럼
+        tables = [
+            ("account_trade_history", "거래내역", "trade_date"),
+            ("holdings", "보유종목", "snapshot_date"),
+            ("account_summary", "계좌요약", "snapshot_date"),
+            ("daily_lots", "일별 로트", "trade_date"),
+            ("portfolio_snapshot", "포트폴리오 스냅샷", "snapshot_date"),
+            ("daily_portfolio_snapshot", "일별 포트폴리오", "snapshot_date"),
+        ]
+
+        with conn.cursor() as cur:
+            for table, desc, date_col in tables:
+                cur.execute(f"SELECT COUNT(*) FROM {table}")
+                count = cur.fetchone()[0]
+
+                # 날짜 범위 확인
+                cur.execute(f"SELECT MIN({date_col}), MAX({date_col}) FROM {table}")
+                row = cur.fetchone()
+                date_range = f"{row[0]} ~ {row[1]}" if row[0] else "N/A"
+
+                print(f"  {desc:20} ({table:30}): {count:>6}건  [{date_range}]")
+
+        print("=" * 60)
+
+    finally:
+        conn.close()
+
+
 if __name__ == "__main__":
-    sync_all()
+    import sys
+
+    if len(sys.argv) > 1:
+        cmd = sys.argv[1]
+        if cmd == "rebuild":
+            # python data_sync_service.py rebuild [start_date]
+            start_date = sys.argv[2] if len(sys.argv) > 2 else "20260201"
+            rebuild_all_data(start_date)
+        elif cmd == "status":
+            show_db_status()
+        elif cmd == "sync":
+            sync_all()
+        else:
+            print("Usage: python data_sync_service.py [rebuild|status|sync] [start_date]")
+    else:
+        # 기본: 상태 출력
+        show_db_status()

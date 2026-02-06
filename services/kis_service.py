@@ -321,12 +321,13 @@ class KISAPIClient:
         all_trades = []
         ctx_area_fk200 = ""
         ctx_area_nk200 = ""
-        max_pages = 100  # Increased from 20 to handle large trade volumes
+        tr_cont_next = ""  # 첫 요청은 공백, 다음 요청은 "N"
+        max_pages = 100
         page = 0
 
         while page < max_pages:
             page += 1
-            headers = self._get_headers(tr_id)
+            headers = self._get_headers(tr_id, tr_cont=tr_cont_next)
 
             params = {
                 "CANO": self.cano,
@@ -360,12 +361,13 @@ class KISAPIClient:
             trades = data.get("output", [])
             all_trades.extend(trades)
 
-            # 연속조회 확인
+            # 연속조회 확인: M이면 다음 페이지 있음, D/E/공백이면 종료
             tr_cont = response.headers.get("tr_cont", "")
-            if tr_cont in ["D", "E", ""]:
+            if tr_cont != "M":
                 break
 
-            # 다음 페이지 조회
+            # 다음 페이지 조회 설정
+            tr_cont_next = "N"  # 다음 요청시 연속조회 표시
             ctx_area_fk200 = data.get("ctx_area_fk200", "")
             ctx_area_nk200 = data.get("ctx_area_nk200", "")
 
