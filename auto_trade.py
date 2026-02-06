@@ -274,12 +274,22 @@ def show_live_status(monitor: MonitorService, prices: dict, holdings_prices: dic
     # ============================================================
     todays_buys_data = []
     for symbol, trigger_info in monitor.daily_triggers.items():
-        entry_price = trigger_info.get('entry_price', 0)
-        is_sold = trigger_info.get('sold', False)
+        trigger_entry = trigger_info.get('entry_price', 0)
+        is_sold_flag = trigger_info.get('sold', False)
 
-        # Get position info if still holding
+        # Check actual position - this overrides the sold flag
         pos = positions.get(symbol, {})
-        stop_loss = pos.get('stop_loss_price', 0)
+        actually_holding = symbol in positions
+
+        # Use position's entry price if holding, otherwise trigger's entry
+        if actually_holding:
+            entry_price = pos.get('entry_price', trigger_entry) or trigger_entry
+            stop_loss = pos.get('stop_loss_price', 0)
+            is_sold = False  # Actually holding, so not sold
+        else:
+            entry_price = trigger_entry
+            stop_loss = 0
+            is_sold = is_sold_flag
 
         price_data = prices.get(symbol, {})
         current = price_data.get('last', 0)
@@ -306,11 +316,16 @@ def show_live_status(monitor: MonitorService, prices: dict, holdings_prices: dic
         print("-" * 70)
 
         for d in todays_buys_data:
+            # Always calculate P/L% if we have the data
+            if d['current'] > 0 and d['entry'] > 0:
+                pnl_str = f"{d['pnl_pct']:+.1f}%"
+            else:
+                pnl_str = "---"
+
+            # Determine status based on actual holding state
             if d['is_sold']:
                 status = "SOLD"
-                pnl_str = "---"
             elif d['current'] > 0 and d['entry'] > 0:
-                pnl_str = f"{d['pnl_pct']:+.1f}%"
                 if d['stop_loss'] > 0 and d['current'] <= d['stop_loss']:
                     status = "STOP!"
                 elif d['pnl_pct'] <= -stop_loss_pct:
@@ -322,7 +337,6 @@ def show_live_status(monitor: MonitorService, prices: dict, holdings_prices: dic
                 else:
                     status = "HOLD -"
             else:
-                pnl_str = "---"
                 status = "LOADING"
 
             stop_str = f"{d['stop_loss']:>10,.2f}" if d['stop_loss'] > 0 else "---".rjust(10)
