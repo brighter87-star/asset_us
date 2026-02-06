@@ -277,7 +277,7 @@ def show_live_status(monitor: MonitorService, prices: dict, holdings_prices: dic
         trigger_entry = trigger_info.get('entry_price', 0)
         is_sold_flag = trigger_info.get('sold', False)
 
-        # Check actual position - this overrides the sold flag
+        # Check actual position - determines if currently holding
         pos = positions.get(symbol, {})
         actually_holding = symbol in positions
 
@@ -285,11 +285,11 @@ def show_live_status(monitor: MonitorService, prices: dict, holdings_prices: dic
         if actually_holding:
             entry_price = pos.get('entry_price', trigger_entry) or trigger_entry
             stop_loss = pos.get('stop_loss_price', 0)
-            is_sold = False  # Actually holding, so not sold
+            is_sold = False  # Actually holding → not sold
         else:
             entry_price = trigger_entry
             stop_loss = 0
-            is_sold = is_sold_flag
+            is_sold = is_sold_flag  # Use flag only if not holding
 
         price_data = prices.get(symbol, {})
         current = price_data.get('last', 0)
@@ -307,8 +307,8 @@ def show_live_status(monitor: MonitorService, prices: dict, holdings_prices: dic
             'is_sold': is_sold,
         })
 
-    # Sort: SOLD first, then by P/L%
-    todays_buys_data.sort(key=lambda x: (not x['is_sold'], -x['pnl_pct']))
+    # Sort: SOLD last, then by P/L% descending
+    todays_buys_data.sort(key=lambda x: (x['is_sold'], -x['pnl_pct']))
 
     print(f"[Today's Buys] ({today_et}) - {len(todays_buys_data)} trades")
     if todays_buys_data:
@@ -316,13 +316,13 @@ def show_live_status(monitor: MonitorService, prices: dict, holdings_prices: dic
         print("-" * 70)
 
         for d in todays_buys_data:
-            # Always calculate P/L% if we have the data
+            # Calculate P/L%
             if d['current'] > 0 and d['entry'] > 0:
                 pnl_str = f"{d['pnl_pct']:+.1f}%"
             else:
                 pnl_str = "---"
 
-            # Determine status based on actual holding state
+            # Determine status - SOLD only if actually not holding
             if d['is_sold']:
                 status = "SOLD"
             elif d['current'] > 0 and d['entry'] > 0:
