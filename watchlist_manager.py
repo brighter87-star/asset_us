@@ -29,18 +29,34 @@ WATCHLIST_PATH = Path(__file__).parent / "watchlist.csv"
 ET = ZoneInfo("America/New_York")
 
 
-def get_today_et() -> date:
+def get_next_trading_day() -> date:
     """
-    Get the date for the upcoming/current US market session.
+    Get the next US trading day.
 
     Logic:
     - Before 8 PM ET: current US date (market is open or will open today)
-    - After 8 PM ET: next US date (today's session ended, next is tomorrow)
+    - After 8 PM ET: next trading day
+    - Skips weekends (Sat/Sun)
+
+    Note: Does not account for US holidays (TODO if needed)
     """
     now_et = datetime.now(ET)
-    if now_et.hour >= 20:  # After 8 PM ET, use tomorrow
-        return (now_et + timedelta(days=1)).date()
-    return now_et.date()
+
+    if now_et.hour >= 20:  # After 8 PM ET, today's session is done
+        target = (now_et + timedelta(days=1)).date()
+    else:
+        target = now_et.date()
+
+    # Skip weekends (Saturday=5, Sunday=6)
+    while target.weekday() >= 5:
+        target += timedelta(days=1)
+
+    return target
+
+
+def get_today_et() -> date:
+    """Alias for get_next_trading_day() for backward compatibility."""
+    return get_next_trading_day()
 
 
 def parse_date(date_str: str) -> date:
