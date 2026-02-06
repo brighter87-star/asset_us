@@ -6,9 +6,15 @@ Usage:
     python db_rebuild.py rebuild [start_date]  - 전체 DB 재구성 (기본: 20260201)
     python db_rebuild.py status                - 현재 DB 상태 확인
     python db_rebuild.py sync                  - 증분 동기화
+    python db_rebuild.py fix-cash [start_date] - 과거 현금 잔고 역산 (기본: 20260201)
 """
 import sys
-from services.data_sync_service import rebuild_all_data, show_db_status, sync_all
+from services.data_sync_service import (
+    rebuild_all_data,
+    show_db_status,
+    sync_all,
+    reconstruct_historical_cash,
+)
 
 
 def main():
@@ -21,6 +27,9 @@ def main():
             show_db_status()
         elif cmd == "sync":
             sync_all()
+        elif cmd == "fix-cash":
+            start_date = sys.argv[2] if len(sys.argv) > 2 else "20260201"
+            reconstruct_historical_cash(start_date)
         else:
             print(__doc__)
     else:

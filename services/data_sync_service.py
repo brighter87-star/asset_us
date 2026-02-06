@@ -573,6 +573,130 @@ def rebuild_all_data(trade_start_date: str = "20260201", clear_derived: bool = T
         conn.close()
 
 
+def reconstruct_historical_cash(start_date: str = "20260201") -> int:
+    """
+    거래내역을 기반으로 과거 현금 잔고를 역산하여 account_summary 업데이트.
+
+    현재 현금에서 시작해 거래내역을 역산:
+    - 매수: 현금 + 매수금액 (과거엔 더 많았음)
+    - 매도: 현금 - 매도금액 (과거엔 더 적었음)
+
+    Args:
+        start_date: 시작 날짜 (YYYYMMDD, 기본: 20260201)
+
+    Returns:
+        업데이트된 레코드 수
+    """
+    import requests
+
+    conn = get_connection()
+    client = KISAPIClient()
+
+    try:
+        print("=" * 60)
+        print("  과거 현금 잔고 역산")
+        print("=" * 60)
+
+        # 1. 현재 현금 잔고 조회
+        print("\n[1] 현재 현금 잔고 조회...")
+        current_cash = 0.0
+        try:
+            url = f"{client.base_url}/uapi/overseas-stock/v1/trading/inquire-psamount"
+            headers = client._get_headers("TTTS3007R")
+            params = {
+                "CANO": client.cano,
+                "ACNT_PRDT_CD": client.acnt_prdt_cd,
+                "OVRS_EXCG_CD": "NASD",
+                "OVRS_ORD_UNPR": "100",
+                "ITEM_CD": "AAPL",
+            }
+            client._wait_for_rate_limit()
+            response = requests.get(url, headers=headers, params=params)
+            data = response.json()
+            if data.get("rt_cd") == "0":
+                output = data.get("output", {})
+                current_cash = float(output.get("ord_psbl_frcr_amt", 0) or 0)
+                print(f"      현재 현금: ${current_cash:,.2f}")
+        except Exception as e:
+            print(f"[ERROR] 현금 조회 실패: {e}")
+            return 0
+
+        # 2. 날짜별 거래 금액 집계
+        print("\n[2] 날짜별 거래 금액 집계...")
+        with conn.cursor() as cur:
+            cur.execute("""
+                SELECT trade_date, io_tp_nm, SUM(cntr_qty * cntr_uv) as total_amount
+                FROM account_trade_history
+                WHERE trade_date >= %s
+                GROUP BY trade_date, io_tp_nm
+                ORDER BY trade_date DESC
+            """, (f"{start_date[:4]}-{start_date[4:6]}-{start_date[6:8]}",))
+
+            trades_by_date = {}
+            for row in cur.fetchall():
+                dt = row[0]
+                io_type = row[1]
+                amount = float(row[2]) if row[2] else 0
+                if dt not in trades_by_date:
+                    trades_by_date[dt] = {"buy": 0.0, "sell": 0.0}
+                if "매수" in str(io_type):
+                    trades_by_date[dt]["buy"] = amount
+                elif "매도" in str(io_type):
+                    trades_by_date[dt]["sell"] = amount
+
+        # 3. 날짜별 현금 역산 및 업데이트
+        print("\n[3] 과거 현금 역산 및 account_summary 업데이트...")
+        today = date.today()
+        start_dt = date(int(start_date[:4]), int(start_date[4:6]), int(start_date[6:8]))
+
+        cash = current_cash
+        updated_count = 0
+        current_dt = today
+
+        while current_dt >= start_dt:
+            # account_summary에 이 날짜 레코드가 있는지 확인
+            with conn.cursor() as cur:
+                cur.execute(
+                    "SELECT aset_evlt_amt, invt_bsamt FROM account_summary WHERE snapshot_date = %s",
+                    (current_dt,)
+                )
+                row = cur.fetchone()
+
+            if row:
+                aset_evlt = float(row[0]) if row[0] else 0
+                invt_bsamt = float(row[1]) if row[1] else 0
+                total_assets = cash + aset_evlt
+
+                # 업데이트
+                with conn.cursor() as cur:
+                    cur.execute("""
+                        UPDATE account_summary
+                        SET cash_balance = %s, tot_est_amt = %s
+                        WHERE snapshot_date = %s
+                    """, (cash, total_assets, current_dt))
+                conn.commit()
+
+                print(f"      {current_dt}: cash=${cash:,.2f}, stock=${aset_evlt:,.2f}, total=${total_assets:,.2f}")
+                updated_count += 1
+
+            # 전날 현금 계산 (역산)
+            if current_dt in trades_by_date:
+                day_trades = trades_by_date[current_dt]
+                # 역산: 매수했으면 현금이 더 많았고, 매도했으면 현금이 더 적었음
+                cash = cash + day_trades["buy"] - day_trades["sell"]
+
+            current_dt -= timedelta(days=1)
+
+        print(f"\n[OK] {updated_count}개 레코드 업데이트 완료")
+        return updated_count
+
+    except Exception as e:
+        print(f"\n[ERROR] 역산 실패: {e}")
+        raise
+    finally:
+        conn.close()
+
+
 def show_db_status():
     """현재 DB 상태 출력."""
     conn = get_connection()
