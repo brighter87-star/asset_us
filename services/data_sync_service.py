@@ -580,20 +580,8 @@ def show_db_status():
 
 
 if __name__ == "__main__":
-    import sys
-
-    if len(sys.argv) > 1:
-        cmd = sys.argv[1]
-        if cmd == "rebuild":
-            # python data_sync_service.py rebuild [start_date]
-            start_date = sys.argv[2] if len(sys.argv) > 2 else "20260201"
-            rebuild_all_data(start_date)
-        elif cmd == "status":
-            show_db_status()
-        elif cmd == "sync":
-            sync_all()
-        else:
-            print("Usage: python data_sync_service.py [rebuild|status|sync] [start_date]")
-    else:
-        # 기본: 상태 출력
-        show_db_status()
+    # 직접 실행시 db_rebuild.py 사용 안내
+    print("Use 'python db_rebuild.py' from project root instead.")
+    print("  python db_rebuild.py rebuild [start_date]")
+    print("  python db_rebuild.py status")
+    print("  python db_rebuild.py sync")
