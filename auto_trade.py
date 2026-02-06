@@ -495,9 +495,13 @@ def run_trading_loop():
     # 보유종목 동기화: API → holdings 테이블 → positions
     print("\n[Holdings Sync] Syncing holdings from KIS API...")
     try:
+        from datetime import timedelta
         conn = get_connection()
         holdings_count = sync_holdings_from_kis(conn)
-        trade_count = sync_trade_history_from_kis(conn)
+        # Only sync last 3 days of trades (avoid slow 1-year default)
+        three_days_ago = (datetime.now().date() - timedelta(days=3)).strftime("%Y%m%d")
+        today_str = datetime.now().date().strftime("%Y%m%d")
+        trade_count = sync_trade_history_from_kis(conn, start_date=three_days_ago, end_date=today_str)
         conn.close()
         print(f"  Synced {holdings_count} holdings, {trade_count} trades from API")
         # Reload daily_triggers after trade history sync
@@ -567,9 +571,10 @@ def run_trading_loop():
             if current_time - last_holdings_sync_time >= HOLDINGS_SYNC_INTERVAL:
                 try:
                     conn = get_connection()
-                    # Sync both holdings and trade history
+                    # Sync holdings and today's trades only
                     holdings_count = sync_holdings_from_kis(conn)
-                    trade_count = sync_trade_history_from_kis(conn)
+                    today_str = now.date().strftime("%Y%m%d")
+                    trade_count = sync_trade_history_from_kis(conn, start_date=today_str, end_date=today_str)
                     conn.close()
                     last_holdings_sync_time = current_time
                     # Reload holdings prices cache after sync
