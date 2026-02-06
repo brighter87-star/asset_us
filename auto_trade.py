@@ -14,7 +14,7 @@ from datetime import datetime
 
 from db.connection import get_connection
 from services.kis_service import KISAPIClient
-from services.data_sync_service import sync_holdings_from_kis
+from services.data_sync_service import sync_holdings_from_kis, sync_trade_history_from_kis
 from services.monitor_service import MonitorService
 from services.trade_logger import trade_logger
 from services.price_service import RestPricePoller
@@ -497,8 +497,11 @@ def run_trading_loop():
     try:
         conn = get_connection()
         holdings_count = sync_holdings_from_kis(conn)
+        trade_count = sync_trade_history_from_kis(conn)
         conn.close()
-        print(f"  Synced {holdings_count} holdings from API")
+        print(f"  Synced {holdings_count} holdings, {trade_count} trades from API")
+        # Reload daily_triggers after trade history sync
+        monitor._load_daily_triggers(verbose=True)
     except Exception as e:
         print(f"  [WARN] Holdings sync failed: {e}")
 
@@ -548,9 +551,11 @@ def run_trading_loop():
     # Monitoring intervals
     STATUS_INTERVAL = 3  # Show status every 3 seconds
     CHECK_INTERVAL = 1   # Check prices every 1 second
+    HOLDINGS_SYNC_INTERVAL = 30  # Sync holdings from API every 30 seconds
 
     last_date = None
     last_status_time = 0
+    last_holdings_sync_time = time.time()
 
     try:
         while True:
@@ -558,7 +563,23 @@ def run_trading_loop():
             today = now.date()
             current_time = time.time()
 
-            # Sync positions from DB every loop (reflects manual buys/sells)
+            # Periodic sync: API → DB (every 30s, reflects manual buys/sells)
+            if current_time - last_holdings_sync_time >= HOLDINGS_SYNC_INTERVAL:
+                try:
+                    conn = get_connection()
+                    # Sync both holdings and trade history
+                    holdings_count = sync_holdings_from_kis(conn)
+                    trade_count = sync_trade_history_from_kis(conn)
+                    conn.close()
+                    last_holdings_sync_time = current_time
+                    # Reload holdings prices cache after sync
+                    holdings_prices = load_holdings_prices_from_db()
+                    # Reload daily_triggers from DB (catches bot trades after sync)
+                    monitor._load_daily_triggers()
+                except Exception as e:
+                    print(f"[WARN] Holdings sync failed: {e}")
+
+            # Sync positions from DB every loop
             monitor.order_service.sync_positions_from_db(
                 stop_loss_pct=monitor.trading_settings.STOP_LOSS_PCT
             )
