@@ -354,7 +354,8 @@ def sync_account_summary_from_kis(
 ) -> int:
     """
     KIS API에서 계좌 요약 정보를 동기화.
-    (holdings 데이터에서 집계)
+
+    총자산(tot_est_amt) = 현금(cash_balance) + 주식평가액(aset_evlt_amt)
 
     Args:
         conn: Database connection
@@ -364,10 +365,36 @@ def sync_account_summary_from_kis(
     Returns:
         1 if synced, 0 otherwise
     """
+    import requests
+
+    if client is None:
+        client = KISAPIClient()
+
     if snapshot_date is None:
         snapshot_date = date.today()
 
-    # holdings에서 집계
+    # 1. 현금(매수가능금액) 조회 from API
+    cash_balance = 0.0
+    try:
+        url = f"{client.base_url}/uapi/overseas-stock/v1/trading/inquire-psamount"
+        headers = client._get_headers("TTTS3007R")
+        params = {
+            "CANO": client.cano,
+            "ACNT_PRDT_CD": client.acnt_prdt_cd,
+            "OVRS_EXCG_CD": "NASD",
+            "OVRS_ORD_UNPR": "100",
+            "ITEM_CD": "AAPL",
+        }
+        client._wait_for_rate_limit()
+        response = requests.get(url, headers=headers, params=params)
+        data = response.json()
+        if data.get("rt_cd") == "0":
+            output = data.get("output", {})
+            cash_balance = float(output.get("ord_psbl_frcr_amt", 0) or 0)
+    except Exception as e:
+        print(f"    Warning: Failed to get cash balance: {e}")
+
+    # 2. holdings에서 주식평가액/투자원금 집계
     with conn.cursor() as cur:
         cur.execute(
             """
@@ -382,18 +409,22 @@ def sync_account_summary_from_kis(
         row = cur.fetchone()
 
     if row is None:
-        return 0
+        total_evlt, total_pur = 0, 0
+    else:
+        total_evlt, total_pur = row
 
-    total_evlt, total_pur = row
+    # 총자산 = 현금 + 주식평가액
+    total_assets = cash_balance + float(total_evlt)
 
     # REPLACE로 upsert
     with conn.cursor() as cur:
         cur.execute(
             """
-            REPLACE INTO account_summary (snapshot_date, aset_evlt_amt, tot_est_amt, invt_bsamt)
-            VALUES (%s, %s, %s, %s)
+            REPLACE INTO account_summary
+            (snapshot_date, aset_evlt_amt, cash_balance, tot_est_amt, invt_bsamt)
+            VALUES (%s, %s, %s, %s, %s)
             """,
-            (snapshot_date, total_evlt, total_evlt, total_pur),
+            (snapshot_date, total_evlt, cash_balance, total_assets, total_pur),
         )
 
     conn.commit()
