@@ -1141,24 +1141,33 @@ class MonitorService:
 
     def refresh_holdings(self):
         """
-        Refresh holdings from KIS API (lightweight, today only).
-        Call this periodically to keep holdings data fresh after manual sells.
+        Refresh holdings from KIS API and reload positions.
+        Call this periodically to keep holdings data fresh after manual buys/sells.
         """
         try:
-            from datetime import date
             from db.connection import get_connection
             from services.data_sync_service import sync_holdings_from_kis
 
             conn = get_connection()
             try:
-                today = date.today()
-                holdings_count = sync_holdings_from_kis(conn, snapshot_date=today)
-                print(f"[REFRESH] Holdings updated: {holdings_count} records")
-                # Invalidate cache
-                self._total_assets = 0
-                return holdings_count
+                # Sync holdings from API to DB
+                holdings_count = sync_holdings_from_kis(conn)
+                print(f"[REFRESH] Holdings synced: {holdings_count} records")
             finally:
                 conn.close()
+
+            # Reload positions from DB (critical - this updates in-memory positions!)
+            synced = self.order_service.sync_positions_from_db(
+                stop_loss_pct=self.trading_settings.STOP_LOSS_PCT
+            )
+            print(f"[REFRESH] Positions reloaded: {synced} positions")
+
+            # Invalidate caches
+            self._total_assets = 0
+            self._today_api_buys = None
+            self._today_api_sells = None
+
+            return holdings_count
         except Exception as e:
             print(f"[WARN] Holdings refresh failed: {e}")
             return 0

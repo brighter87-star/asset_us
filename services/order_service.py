@@ -4,13 +4,29 @@ Handles position sizing, order execution, and position tracking.
 """
 
 import json
-from datetime import datetime
+from datetime import datetime, date, timedelta
 from decimal import Decimal, ROUND_DOWN
 from pathlib import Path
 from typing import Dict, List, Optional, Any
+from zoneinfo import ZoneInfo
 
 from services.kis_service import KISAPIClient
 from services.trade_logger import trade_logger
+
+# US Eastern timezone
+ET = ZoneInfo("America/New_York")
+
+
+def get_trading_date_et() -> date:
+    """
+    Get the current US trading date (ET timezone).
+    - Before 8 PM ET: current date
+    - After 8 PM ET: next date (today's session ended)
+    """
+    now_et = datetime.now(ET)
+    if now_et.hour >= 20:
+        return (now_et + timedelta(days=1)).date()
+    return now_et.date()
 
 # 포지션 상태 파일
 POSITIONS_FILE = Path(__file__).resolve().parent.parent / ".positions.json"
@@ -106,17 +122,11 @@ class OrderService:
         try:
             conn = get_connection()
 
-            # Use most recent snapshot_date (handles KST/ET timezone mismatch)
+            # Use US ET date for consistency with trading schedule
+            trading_date = get_trading_date_et()
+
             with conn.cursor() as cur:
-                cur.execute("SELECT MAX(snapshot_date) FROM holdings WHERE rmnd_qty > 0")
-                result = cur.fetchone()
-                snapshot_date = result[0] if result and result[0] else None
-
-                if not snapshot_date:
-                    print("[WARN] No holdings data found in DB")
-                    conn.close()
-                    return 0
-
+                # First try today's ET date, then fall back to most recent date
                 cur.execute("""
                     SELECT
                         stk_cd as stock_code,
@@ -131,7 +141,32 @@ class OrderService:
                     FROM holdings
                     WHERE snapshot_date = %s AND rmnd_qty > 0
                     GROUP BY stk_cd, crd_class
-                """, (snapshot_date,))
+                """, (trading_date,))
+                rows = cur.fetchall()
+
+                # If no data for today's ET date, try most recent snapshot
+                if not rows:
+                    cur.execute("SELECT MAX(snapshot_date) FROM holdings WHERE rmnd_qty > 0")
+                    result = cur.fetchone()
+                    fallback_date = result[0] if result and result[0] else None
+
+                    if fallback_date:
+                        print(f"[WARN] No holdings for {trading_date}, using {fallback_date}")
+                        cur.execute("""
+                            SELECT
+                                stk_cd as stock_code,
+                                stk_nm as stock_name,
+                                crd_class,
+                                SUM(rmnd_qty) as total_qty,
+                                SUM(rmnd_qty * avg_prc) / SUM(rmnd_qty) as avg_price,
+                                SUM(rmnd_qty * avg_prc) as total_cost,
+                                MAX(cur_prc) as current_price,
+                                MAX(exchange_code) as exchange_code,
+                                MAX(currency) as currency
+                            FROM holdings
+                            WHERE snapshot_date = %s AND rmnd_qty > 0
+                            GROUP BY stk_cd, crd_class
+                        """, (fallback_date,))
                 rows = cur.fetchall()
 
             conn.close()
@@ -281,7 +316,18 @@ class OrderService:
         buffer_levels = [base_buffer, base_buffer * 2]
 
         for buffer_pct in buffer_levels:
-            buy_price = self.add_price_buffer(target_price, buffer_pct)
+            # Fetch real-time current price from API (not cached price)
+            try:
+                exchange_code = self._detect_exchange(symbol)
+                real_time_price = self.client.get_current_price(symbol, exchange_code)
+                current_price = real_time_price.get("last", target_price)
+                print(f"[{symbol}] Real-time price: ${current_price:.2f}")
+            except Exception as e:
+                print(f"[{symbol}] Failed to get real-time price, using cached: {e}")
+                current_price = target_price
+
+            # Apply buffer to real-time current price
+            buy_price = self.add_price_buffer(current_price, buffer_pct)
             shares = self.calculate_shares(buy_price)
 
             if shares <= 0:
@@ -383,11 +429,22 @@ class OrderService:
         except Exception as e:
             print(f"[{symbol}] Could not verify sellable qty, using position qty: {e}")
 
-        # Try with increasing buffer: -0.5% -> -1.0%
-        buffer_levels = [0.5, 1.0]
+        # Use configured buffer as base, then scale up for retry
+        base_buffer = getattr(self.settings, 'PRICE_BUFFER_PCT', 1.0)
+        buffer_levels = [base_buffer, base_buffer * 2]
 
         for buffer_pct in buffer_levels:
-            sell_price = self.subtract_price_buffer(price, buffer_pct)
+            # Fetch real-time current price from API (not cached price)
+            try:
+                exchange_code = self._detect_exchange(symbol)
+                real_time_price = self.client.get_current_price(symbol, exchange_code)
+                current_price = real_time_price.get("last", price)
+                print(f"[{symbol}] Real-time price: ${current_price:.2f}")
+            except Exception as e:
+                print(f"[{symbol}] Failed to get real-time price, using passed: {e}")
+                current_price = price
+
+            sell_price = self.subtract_price_buffer(current_price, buffer_pct)
 
             print(f"[{symbol}] SELL attempt: {quantity} shares @ ${sell_price:.2f} (-{buffer_pct}%)")
             trade_logger.log_order_attempt(symbol, "SELL", quantity, sell_price, "LIMIT", f"{reason}_-{buffer_pct}%")
