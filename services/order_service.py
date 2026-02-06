@@ -311,88 +311,78 @@ class OrderService:
         """
         reason = "initial_entry" if is_initial else "pyramid"
 
-        # Use configured buffer as base, then scale up for retry
-        base_buffer = getattr(self.settings, 'PRICE_BUFFER_PCT', 1.0)
-        buffer_levels = [base_buffer, base_buffer * 2]
+        # Fixed 0.5% buffer on real-time price
+        buffer_pct = 0.5
 
-        for buffer_pct in buffer_levels:
-            # Fetch real-time current price from API (not cached price)
-            try:
-                exchange_code = self._detect_exchange(symbol)
-                real_time_price = self.client.get_current_price(symbol, exchange_code)
-                current_price = real_time_price.get("last", target_price)
-                print(f"[{symbol}] Real-time price: ${current_price:.2f}")
-            except Exception as e:
-                print(f"[{symbol}] Failed to get real-time price, using cached: {e}")
-                current_price = target_price
+        # Fetch real-time current price from API (not cached price)
+        try:
+            exchange_code = self._detect_exchange(symbol)
+            real_time_price = self.client.get_current_price(symbol, exchange_code)
+            current_price = real_time_price.get("last", target_price)
+            print(f"[{symbol}] Real-time price: ${current_price:.2f}")
+        except Exception as e:
+            print(f"[{symbol}] Failed to get real-time price, using cached: {e}")
+            current_price = target_price
 
-            # Apply buffer to real-time current price
-            buy_price = self.add_price_buffer(current_price, buffer_pct)
-            shares = self.calculate_shares(buy_price)
+        # Apply buffer to real-time current price
+        buy_price = self.add_price_buffer(current_price, buffer_pct)
+        shares = self.calculate_shares(buy_price)
 
-            if shares <= 0:
-                print(f"[{symbol}] Insufficient capital for buy order")
-                return None
+        if shares <= 0:
+            print(f"[{symbol}] Insufficient capital for buy order")
+            return None
 
-            print(f"[{symbol}] BUY attempt: {shares} shares @ ${buy_price:.2f} (+{buffer_pct}%)")
-            trade_logger.log_order_attempt(symbol, "BUY", shares, buy_price, "LIMIT", f"{reason}_+{buffer_pct}%")
+        print(f"[{symbol}] BUY: {shares} shares @ ${buy_price:.2f} (+{buffer_pct}%)")
+        trade_logger.log_order_attempt(symbol, "BUY", shares, buy_price, "LIMIT", f"{reason}_+{buffer_pct}%")
 
-            try:
-                exchange_code = self._detect_exchange(symbol)
-                result = self.client.buy_order(symbol, shares, buy_price, exchange_code=exchange_code)
+        try:
+            result = self.client.buy_order(symbol, shares, buy_price, exchange_code=exchange_code)
 
-                trade_logger.log_order_result(
-                    symbol, "BUY", shares, buy_price,
-                    success=True,
-                    order_no=result.get("order_no", ""),
-                    order_time=result.get("order_time", ""),
-                    message=result.get("message", ""),
-                )
+            trade_logger.log_order_result(
+                symbol, "BUY", shares, buy_price,
+                success=True,
+                order_no=result.get("order_no", ""),
+                order_time=result.get("order_time", ""),
+                message=result.get("message", ""),
+            )
 
-                # Update position tracking
-                if symbol not in self.positions:
-                    self.positions[symbol] = {
-                        "symbol": symbol,
-                        "status": "open",
-                        "entry_price": buy_price,
-                        "quantity": shares,
-                        "stop_loss_pct": stop_loss_pct or self.settings.STOP_LOSS_PCT,
-                        "entry_time": datetime.now().isoformat(),
-                        "buy_count": 1,
-                    }
-                    trade_logger.log_position_update(symbol, "OPEN", shares, buy_price, shares)
-                else:
-                    pos = self.positions[symbol]
-                    old_qty = pos.get("quantity", 0)
-                    old_price = pos.get("entry_price", buy_price)
-                    new_qty = old_qty + shares
-                    new_avg_price = (old_price * old_qty + buy_price * shares) / new_qty
+            # Update position tracking
+            if symbol not in self.positions:
+                self.positions[symbol] = {
+                    "symbol": symbol,
+                    "status": "open",
+                    "entry_price": buy_price,
+                    "quantity": shares,
+                    "stop_loss_pct": stop_loss_pct or self.settings.STOP_LOSS_PCT,
+                    "entry_time": datetime.now().isoformat(),
+                    "buy_count": 1,
+                }
+                trade_logger.log_position_update(symbol, "OPEN", shares, buy_price, shares)
+            else:
+                pos = self.positions[symbol]
+                old_qty = pos.get("quantity", 0)
+                old_price = pos.get("entry_price", buy_price)
+                new_qty = old_qty + shares
+                new_avg_price = (old_price * old_qty + buy_price * shares) / new_qty
 
-                    pos["quantity"] = new_qty
-                    pos["entry_price"] = new_avg_price
-                    pos["buy_count"] = pos.get("buy_count", 1) + 1
-                    pos["last_buy_time"] = datetime.now().isoformat()
+                pos["quantity"] = new_qty
+                pos["entry_price"] = new_avg_price
+                pos["buy_count"] = pos.get("buy_count", 1) + 1
+                pos["last_buy_time"] = datetime.now().isoformat()
 
-                    trade_logger.log_position_update(symbol, "ADD", shares, buy_price, new_qty)
+                trade_logger.log_position_update(symbol, "ADD", shares, buy_price, new_qty)
 
-                self._save_positions()
-                return result
+            self._save_positions()
+            return result
 
-            except Exception as e:
-                error_msg = str(e)
-                trade_logger.log_order_result(
-                    symbol, "BUY", shares, buy_price,
-                    success=False, error=error_msg
-                )
-                # Check if it's a price-related error that warrants retry
-                if buffer_pct < buffer_levels[-1]:
-                    print(f"[{symbol}] BUY failed with +{buffer_pct}%, retrying with +{buffer_levels[buffer_levels.index(buffer_pct)+1]}%...")
-                    continue
-                else:
-                    print(f"[{symbol}] BUY failed after all retries: {error_msg}")
-                    return None
-
-        return None
+        except Exception as e:
+            error_msg = str(e)
+            trade_logger.log_order_result(
+                symbol, "BUY", shares, buy_price,
+                success=False, error=error_msg
+            )
+            print(f"[{symbol}] BUY failed: {error_msg}")
+            return None
 
     def execute_sell(self, symbol: str, price: float, reason: str = "") -> Optional[dict]:
         """
@@ -429,71 +419,61 @@ class OrderService:
         except Exception as e:
             print(f"[{symbol}] Could not verify sellable qty, using position qty: {e}")
 
-        # Use configured buffer as base, then scale up for retry
-        base_buffer = getattr(self.settings, 'PRICE_BUFFER_PCT', 1.0)
-        buffer_levels = [base_buffer, base_buffer * 2]
+        # Fixed 0.5% buffer on real-time price
+        buffer_pct = 0.5
 
-        for buffer_pct in buffer_levels:
-            # Fetch real-time current price from API (not cached price)
-            try:
-                exchange_code = self._detect_exchange(symbol)
-                real_time_price = self.client.get_current_price(symbol, exchange_code)
-                current_price = real_time_price.get("last", price)
-                print(f"[{symbol}] Real-time price: ${current_price:.2f}")
-            except Exception as e:
-                print(f"[{symbol}] Failed to get real-time price, using passed: {e}")
-                current_price = price
+        # Fetch real-time current price from API (not cached price)
+        try:
+            exchange_code = self._detect_exchange(symbol)
+            real_time_price = self.client.get_current_price(symbol, exchange_code)
+            current_price = real_time_price.get("last", price)
+            print(f"[{symbol}] Real-time price: ${current_price:.2f}")
+        except Exception as e:
+            print(f"[{symbol}] Failed to get real-time price, using passed: {e}")
+            current_price = price
 
-            sell_price = self.subtract_price_buffer(current_price, buffer_pct)
+        sell_price = self.subtract_price_buffer(current_price, buffer_pct)
 
-            print(f"[{symbol}] SELL attempt: {quantity} shares @ ${sell_price:.2f} (-{buffer_pct}%)")
-            trade_logger.log_order_attempt(symbol, "SELL", quantity, sell_price, "LIMIT", f"{reason}_-{buffer_pct}%")
+        print(f"[{symbol}] SELL: {quantity} shares @ ${sell_price:.2f} (-{buffer_pct}%)")
+        trade_logger.log_order_attempt(symbol, "SELL", quantity, sell_price, "LIMIT", f"{reason}_-{buffer_pct}%")
 
-            try:
-                exchange_code = self._detect_exchange(symbol)
-                result = self.client.sell_order(symbol, quantity, sell_price, exchange_code=exchange_code)
+        try:
+            result = self.client.sell_order(symbol, quantity, sell_price, exchange_code=exchange_code)
 
-                # Calculate P&L
-                entry_price = pos.get("entry_price", price)
-                pnl = (sell_price - entry_price) * quantity
-                pnl_pct = ((sell_price / entry_price) - 1) * 100
+            # Calculate P&L
+            entry_price = pos.get("entry_price", price)
+            pnl = (sell_price - entry_price) * quantity
+            pnl_pct = ((sell_price / entry_price) - 1) * 100
 
-                trade_logger.log_order_result(
-                    symbol, "SELL", quantity, sell_price,
-                    success=True,
-                    order_no=result.get("order_no", ""),
-                    order_time=result.get("order_time", ""),
-                    message=result.get("message", ""),
-                )
+            trade_logger.log_order_result(
+                symbol, "SELL", quantity, sell_price,
+                success=True,
+                order_no=result.get("order_no", ""),
+                order_time=result.get("order_time", ""),
+                message=result.get("message", ""),
+            )
 
-                # Close position
-                pos["status"] = "closed"
-                pos["exit_price"] = sell_price
-                pos["exit_time"] = datetime.now().isoformat()
-                pos["exit_reason"] = reason
-                pos["realized_pnl"] = pnl
-                pos["realized_pnl_pct"] = pnl_pct
+            # Close position
+            pos["status"] = "closed"
+            pos["exit_price"] = sell_price
+            pos["exit_time"] = datetime.now().isoformat()
+            pos["exit_reason"] = reason
+            pos["realized_pnl"] = pnl
+            pos["realized_pnl_pct"] = pnl_pct
 
-                trade_logger.log_position_update(symbol, "CLOSE", quantity, sell_price, 0, pnl)
+            trade_logger.log_position_update(symbol, "CLOSE", quantity, sell_price, 0, pnl)
 
-                self._save_positions()
-                return result
+            self._save_positions()
+            return result
 
-            except Exception as e:
-                error_msg = str(e)
-                trade_logger.log_order_result(
-                    symbol, "SELL", quantity, sell_price,
-                    success=False, error=error_msg
-                )
-                # Check if it's a price-related error that warrants retry
-                if buffer_pct < buffer_levels[-1]:
-                    print(f"[{symbol}] SELL failed with -{buffer_pct}%, retrying with -{buffer_levels[buffer_levels.index(buffer_pct)+1]}%...")
-                    continue
-                else:
-                    print(f"[{symbol}] SELL failed after all retries: {error_msg}")
-                    return None
-
-        return None
+        except Exception as e:
+            error_msg = str(e)
+            trade_logger.log_order_result(
+                symbol, "SELL", quantity, sell_price,
+                success=False, error=error_msg
+            )
+            print(f"[{symbol}] SELL failed: {error_msg}")
+            return None
 
     def check_stop_loss(self, symbol: str, current_price: float) -> bool:
         """

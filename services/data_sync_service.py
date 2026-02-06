@@ -3,13 +3,29 @@ Data synchronization service for overseas stocks.
 Syncs data from Korea Investment & Securities API to asset_us database.
 """
 
-from datetime import date, timedelta
+from datetime import date, datetime, timedelta
 from typing import Optional, List, Dict, Any
+from zoneinfo import ZoneInfo
 
 import pymysql
 
 from db.connection import get_connection
 from services.kis_service import KISAPIClient
+
+# US Eastern timezone
+ET = ZoneInfo("America/New_York")
+
+
+def get_trading_date_et() -> date:
+    """
+    Get the current US trading date (ET timezone).
+    - Before 8 PM ET: current date
+    - After 8 PM ET: next date (today's session ended)
+    """
+    now_et = datetime.now(ET)
+    if now_et.hour >= 20:
+        return (now_et + timedelta(days=1)).date()
+    return now_et.date()
 
 
 # 거래소별 통화 매핑
@@ -51,7 +67,7 @@ def sync_holdings_from_kis(
     Args:
         conn: Database connection
         client: KIS API client (optional, creates new one if not provided)
-        snapshot_date: Snapshot date (default: today)
+        snapshot_date: Snapshot date (default: US ET trading date)
 
     Returns:
         Number of holdings synced
@@ -60,7 +76,8 @@ def sync_holdings_from_kis(
         client = KISAPIClient()
 
     if snapshot_date is None:
-        snapshot_date = date.today()
+        # Use US ET date for consistency with trading schedule
+        snapshot_date = get_trading_date_et()
 
     # US 거래소에서만 잔고 조회 (NASD, NYSE, AMEX)
     US_EXCHANGES = [("NASD", "USD"), ("NYSE", "USD"), ("AMEX", "USD")]
@@ -360,7 +377,7 @@ def sync_account_summary_from_kis(
     Args:
         conn: Database connection
         client: KIS API client
-        snapshot_date: Snapshot date
+        snapshot_date: Snapshot date (default: US ET trading date)
 
     Returns:
         1 if synced, 0 otherwise
@@ -371,7 +388,8 @@ def sync_account_summary_from_kis(
         client = KISAPIClient()
 
     if snapshot_date is None:
-        snapshot_date = date.today()
+        # Use US ET date for consistency with trading schedule
+        snapshot_date = get_trading_date_et()
 
     # 1. 현금(매수가능금액) 조회 from API
     cash_balance = 0.0
