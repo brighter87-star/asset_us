@@ -167,7 +167,7 @@ class OrderService:
                             WHERE snapshot_date = %s AND rmnd_qty > 0
                             GROUP BY stk_cd, crd_class
                         """, (fallback_date,))
-                rows = cur.fetchall()
+                        rows = cur.fetchall()
 
             conn.close()
 
@@ -210,7 +210,6 @@ class OrderService:
                 synced += 1
 
             self._save_positions()
-            print(f"[SYNC] Loaded {synced} positions from holdings DB")
             return synced
 
         except Exception as e:
