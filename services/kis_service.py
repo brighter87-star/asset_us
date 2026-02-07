@@ -429,6 +429,61 @@ class KISAPIClient:
             "volume": int(output.get("tvol", 0)),
         }
 
+    def get_daily_prices(self, symbol, exchange_code="NAS", days=6, period="0", adjust="1"):
+        """
+        해외주식 기간별시세 조회 (GET /uapi/overseas-price/v1/quotations/dailyprice)
+
+        TR_ID: HHDFS76240000
+
+        Args:
+            symbol: 종목코드
+            exchange_code: 거래소코드 (NAS, NYS, AMS)
+            days: 가져올 일수 (기본 6 - 오늘 포함해서 넉넉하게)
+            period: 0=일, 1=주, 2=월
+            adjust: 0=원주가, 1=수정주가
+
+        Returns:
+            list[dict]: 일별 시세 리스트 (최신순) [{date, open, high, low, close, volume}, ...]
+        """
+        url = f"{self.base_url}/uapi/overseas-price/v1/quotations/dailyprice"
+        tr_id = "HHDFS76240000"
+
+        headers = self._get_headers(tr_id)
+
+        params = {
+            "AUTH": "",
+            "EXCD": exchange_code,
+            "SYMB": symbol,
+            "GUBN": period,
+            "BYMD": "",  # 빈값이면 최근일자부터
+            "MODP": adjust,
+        }
+
+        self._wait_for_rate_limit()
+
+        response = requests.get(url, headers=headers, params=params)
+
+        if response.status_code != 200:
+            raise Exception(f"Daily price request failed: {response.status_code}")
+
+        data = response.json()
+
+        if data.get("rt_cd") != "0":
+            raise Exception(f"API error: {data.get('msg_cd')} - {data.get('msg1')}")
+
+        results = []
+        for item in (data.get("output2") or [])[:days]:
+            results.append({
+                "date": item.get("xymd", ""),
+                "open": float(item.get("open", 0)),
+                "high": float(item.get("high", 0)),
+                "low": float(item.get("low", 0)),
+                "close": float(item.get("clos", 0)),
+                "volume": int(item.get("tvol", 0)),
+            })
+
+        return results
+
     def get_buying_power(self, exchange_code="NASD", symbol="AAPL"):
         """
         해외주식 매수가능금액 조회

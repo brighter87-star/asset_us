@@ -40,8 +40,8 @@ class TradingSettings:
         self.PRICE_BUFFER_PCT: float = 0.5  # 주문가 버퍼 % (현재가 * 1.005)
         # Volume filter settings (optional)
         self.VOLUME_FILTER_ENABLED: float = 0.0  # 0=off, 1=on (float for CSV compatibility)
-        self.VOLUME_MULTIPLIER: float = 2.0  # 현재 거래량 > 시간보정 평균 × 배수
-        self.VOLUME_LOOKBACK_DAYS: float = 5.0  # 평균 계산 일수
+        self.VOLUME_MULTIPLIER: float = 1.5  # 현재 거래량 > 평균 × 배수
+        self.VOLUME_LOOKBACK_DAYS: float = 10.0  # 평균 계산 일수
 
     def update(self, key: str, value):
         """Update setting value."""
@@ -933,18 +933,61 @@ class MonitorService:
         self._skipped_symbols[symbol] = now
         return True
 
-    def check_breakout_entry(self, item: dict) -> bool:
+    def get_average_volume(self, symbol: str, days: int = None) -> Optional[float]:
         """
-        Check if breakout entry condition is met.
+        Get average daily volume for the past N trading days (excluding today).
 
-        Returns True if:
-        - Current price >= target price (+ tick buffer applied in order)
-        - Not already triggered today (for this unit)
-        - current_units < max_units (allows pyramiding based on actual holdings)
+        Args:
+            symbol: ticker symbol
+            days: lookback days (default: from settings VOLUME_LOOKBACK_DAYS)
+
+        Returns:
+            Average volume (float) or None if data unavailable.
+        """
+        if days is None:
+            days = int(self.settings.VOLUME_LOOKBACK_DAYS)
+
+        try:
+            # Fetch days+1 to exclude today (first entry is today)
+            # Try multiple exchanges (same as get_price)
+            daily = None
+            for exchange in ["NAS", "NYS", "AMS"]:
+                try:
+                    daily = self.client.get_daily_prices(symbol, exchange_code=exchange, days=days + 1)
+                    if daily and len(daily) >= 2:
+                        break
+                except Exception:
+                    continue
+
+            if not daily or len(daily) < 2:
+                return None
+
+            # Skip today (index 0), take past N days
+            past_days = daily[1:days + 1]
+            if not past_days:
+                return None
+
+            volumes = [d["volume"] for d in past_days if d["volume"] > 0]
+            if not volumes:
+                return None
+
+            return sum(volumes) / len(volumes)
+        except Exception as e:
+            print(f"[{symbol}] Failed to get average volume: {e}")
+            return None
+
+    def check_entry_preconditions(self, item: dict) -> bool:
+        """
+        Common preconditions for all entry types.
+
+        Returns True if all preconditions pass:
         - Not expired (no sell after added_date)
+        - current_units < max_units (allows pyramiding)
+        - Not already triggered today (3-layer check)
+
+        Add new entry conditions here to apply to all entry types.
         """
         symbol = item["ticker"]
-        target_price = item["target_price"]
         max_units = item.get("max_units", 1)
 
         # Skip expired stocks (sold after added_date)
@@ -958,7 +1001,7 @@ class MonitorService:
         if current_units >= max_units:
             return False
 
-        # === SAFETY CHECKS FIRST (before price check) ===
+        # === SAFETY CHECKS (prevent duplicate buys) ===
 
         # 1. Check daily_triggers (in-memory, fastest)
         today_triggers = self.daily_triggers.get(symbol, {}).get("trigger_count", 0)
@@ -979,15 +1022,25 @@ class MonitorService:
                 print(f"[{symbol}] Skipping: DB shows today's buy")
             return False
 
-        # === Now check price ===
+        return True
+
+    def check_breakout_entry(self, item: dict) -> bool:
+        """Check if breakout entry condition is met (current price >= target)."""
+        if not self.check_entry_preconditions(item):
+            return False
+
+        symbol = item["ticker"]
+        target_price = item["target_price"]
+
         price_data = self.get_price(symbol)
         if not price_data:
             return False
 
         current_price = price_data["last"]
 
-        # Check breakout (current >= target)
         if current_price >= target_price:
+            max_units = item.get("max_units", 1)
+            current_units = self.get_current_units_held(symbol)
             remaining_units = max_units - current_units
             print(f"[{symbol}] BREAKOUT: ${current_price:.2f} >= ${target_price:.2f}")
             print(f"[{symbol}] Units: {current_units:.2f}/{max_units} held, {remaining_units:.2f} remaining")
@@ -996,55 +1049,22 @@ class MonitorService:
         return False
 
     def check_gap_up_entry(self, item: dict) -> bool:
-        """
-        Check if gap-up entry condition is met at market open.
+        """Check if gap-up entry condition is met at market open (open price >= target)."""
+        if not self.check_entry_preconditions(item):
+            return False
 
-        Returns True if:
-        - It's market open time
-        - Open price > target price
-        - current_units < max_units (allows pyramiding)
-        - Not already triggered today
-        - Not expired (no sell after added_date)
-        """
         symbol = item["ticker"]
         target_price = item["target_price"]
-        max_units = item.get("max_units", 1)
 
-        # Skip expired stocks (sold after added_date)
-        if symbol in self.get_expired_stocks():
-            return False
-
-        # Check how many units already held (from actual holdings, includes manual buys)
-        current_units = self.get_current_units_held(symbol)
-
-        # Already at max units?
-        if current_units >= max_units:
-            return False
-
-        # === SAFETY CHECKS FIRST ===
-
-        # 1. Check daily_triggers (in-memory)
-        today_triggers = self.daily_triggers.get(symbol, {}).get("trigger_count", 0)
-        if today_triggers >= 1:
-            return False
-
-        # 2. Check KIS API directly (most reliable)
-        if self.has_today_api_buy(symbol):
-            return False
-
-        # 3. Check DB as additional safety
-        if self.has_today_db_buy(symbol):
-            return False
-
-        # === Now check price ===
         price_data = self.get_price(symbol)
         if not price_data:
             return False
 
         open_price = price_data["open"]
 
-        # Gap up: open >= target
         if open_price >= target_price:
+            max_units = item.get("max_units", 1)
+            current_units = self.get_current_units_held(symbol)
             remaining_units = max_units - current_units
             print(f"[{symbol}] GAP UP: Open ${open_price:.2f} >= ${target_price:.2f}")
             print(f"[{symbol}] Units: {current_units:.2f}/{max_units} held, {remaining_units:.2f} remaining")
@@ -1310,8 +1330,8 @@ class MonitorService:
         Execute end-of-day logic for TODAY's entries only.
 
         Logic (stocks entered today - both auto and manual):
-        - If close > entry: Add 0.5 unit (pyramid)
-        - If close < entry: Sell all (cut loss)
+        - If close > entry AND volume >= N× avg: Add 0.5 unit (pyramid)
+        - If close <= entry OR volume < N× avg: Sell all
 
         Pre-existing positions (bought before today) are NOT affected.
 
@@ -1329,6 +1349,8 @@ class MonitorService:
 
         print(f"[CLOSE] Checking {len(today_bought)} stocks bought today: {today_bought}")
 
+        volume_multiplier = self.settings.VOLUME_MULTIPLIER
+
         for pos in self.order_service.get_open_positions():
             symbol = pos["symbol"]
 
@@ -1343,10 +1365,34 @@ class MonitorService:
                 continue
 
             current_price = price_data["last"]
+            today_volume = price_data.get("volume", 0)
 
-            if current_price > entry_price:
-                # Profitable - pyramid
-                print(f"[{symbol}] Close ${current_price:.2f} > Entry ${entry_price:.2f} - PYRAMID")
+            # Check volume condition
+            avg_volume = self.get_average_volume(symbol)
+            volume_ok = False
+            volume_ratio = 0.0
+            if avg_volume and avg_volume > 0:
+                volume_ratio = today_volume / avg_volume
+                volume_ok = volume_ratio >= volume_multiplier
+                print(f"[{symbol}] Volume: {today_volume:,} / Avg: {avg_volume:,.0f} = {volume_ratio:.1f}x (need {volume_multiplier}x)")
+            else:
+                print(f"[{symbol}] Volume: avg data unavailable - treating as insufficient")
+
+            change_pct = ((current_price - entry_price) / entry_price * 100) if entry_price > 0 else 0
+            log_kwargs = dict(
+                symbol=symbol,
+                entry_price=entry_price,
+                close_price=current_price,
+                change_pct=change_pct,
+                today_volume=today_volume,
+                avg_volume=avg_volume or 0,
+                volume_ratio=volume_ratio,
+                volume_threshold=volume_multiplier,
+            )
+
+            if current_price > entry_price and volume_ok:
+                # Profitable + strong volume - pyramid
+                print(f"[{symbol}] Close ${current_price:.2f} > Entry ${entry_price:.2f} + volume OK - PYRAMID")
 
                 # Find watchlist item for stop_loss_pct
                 watchlist_item = next(
@@ -1364,23 +1410,32 @@ class MonitorService:
 
                 if result:
                     actions[symbol] = "pyramid"
+                    trade_logger.log_close_action(action="PYRAMID", reason="pyramid", **log_kwargs)
                 else:
                     actions[symbol] = "pyramid_failed"
+                    trade_logger.log_close_action(action="PYRAMID_FAILED", reason="pyramid_failed", **log_kwargs)
 
             else:
-                # Loss - sell all
-                print(f"[{symbol}] Close ${current_price:.2f} <= Entry ${entry_price:.2f} - SELL")
+                # Sell: loss OR profit but weak volume
+                if current_price > entry_price:
+                    reason = "close_weak_volume"
+                    print(f"[{symbol}] Close ${current_price:.2f} > Entry ${entry_price:.2f} but volume insufficient - SELL")
+                else:
+                    reason = "close_below_entry"
+                    print(f"[{symbol}] Close ${current_price:.2f} <= Entry ${entry_price:.2f} - SELL")
 
                 result = self.order_service.execute_sell(
                     symbol=symbol,
                     price=current_price,
-                    reason="close_below_entry",
+                    reason=reason,
                 )
 
                 if result:
                     actions[symbol] = "sold"
+                    trade_logger.log_close_action(action="SELL", reason=reason, **log_kwargs)
                 else:
                     actions[symbol] = "sell_failed"
+                    trade_logger.log_close_action(action="SELL_FAILED", reason=reason, **log_kwargs)
 
         return actions
 

@@ -329,12 +329,54 @@ class TradeLogger:
         entry_price: float,
         close_price: float,
         change_pct: float,
+        today_volume: int = 0,
+        avg_volume: float = 0,
+        volume_ratio: float = 0,
+        volume_threshold: float = 0,
+        reason: str = "",
     ):
-        """Log end-of-day action."""
+        """Log end-of-day action with volume details."""
         self._get_file_handler()
 
         msg = f"CLOSE_ACTION | {symbol} | action={action} | entry=${entry_price:.2f} | close=${close_price:.2f} | change={change_pct:+.2f}%"
+        if avg_volume > 0:
+            msg += f" | vol={today_volume:,} / avg={avg_volume:,.0f} = {volume_ratio:.1f}x (need {volume_threshold}x)"
         self.logger.info(msg)
+
+        # Telegram notification
+        price_ok = close_price > entry_price
+        volume_ok = volume_ratio >= volume_threshold if avg_volume > 0 else False
+
+        price_icon = "\u2705" if price_ok else "\u274C"
+        volume_icon = "\u2705" if volume_ok else "\u274C"
+
+        if action == "PYRAMID":
+            header = "\U0001F4C8 <b>장마감 추가매수</b>"
+        elif reason == "close_weak_volume":
+            header = "\U0001F4CA <b>장마감 매도 (거래량 부족)</b>"
+        else:
+            header = "\U0001F4C9 <b>장마감 매도 (손실)</b>"
+
+        vol_line = ""
+        if avg_volume > 0:
+            vol_line = (
+                f"\n\n<b>조건 충족 여부:</b>\n"
+                f"{price_icon} 수익: ${close_price:.2f} vs ${entry_price:.2f} ({change_pct:+.2f}%)\n"
+                f"{volume_icon} 거래량: {today_volume:,} / 평균 {avg_volume:,.0f} = {volume_ratio:.1f}x (기준 {volume_threshold}x)"
+            )
+        else:
+            vol_line = (
+                f"\n\n<b>조건 충족 여부:</b>\n"
+                f"{price_icon} 수익: ${close_price:.2f} vs ${entry_price:.2f} ({change_pct:+.2f}%)\n"
+                f"\u274C 거래량: 평균 데이터 없음"
+            )
+
+        tg_msg = (
+            f"{header}\n"
+            f"종목: <code>{symbol}</code>"
+            f"{vol_line}"
+        )
+        self._send_telegram(tg_msg)
 
         self._write_json_log({
             "timestamp": datetime.now().isoformat(),
@@ -344,6 +386,11 @@ class TradeLogger:
             "entry_price": entry_price,
             "close_price": close_price,
             "change_pct": change_pct,
+            "today_volume": today_volume,
+            "avg_volume": avg_volume,
+            "volume_ratio": volume_ratio,
+            "volume_threshold": volume_threshold,
+            "reason": reason,
         })
 
     def log_position_update(
