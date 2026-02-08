@@ -1022,6 +1022,16 @@ class MonitorService:
                 print(f"[{symbol}] Skipping: DB shows today's buy")
             return False
 
+        # === TODO: Industry Action 필터 (테마 분류기 완성 후 활성화) ===
+        # 같은 테마/섹터 내 대표 종목들(예: 5개)의 당일 평균 상승률을 계산하고,
+        # 해당 평균이 시장(SPY 등) 대비 높은 경우에만 매수를 허용.
+        # - watchlist에 theme/sector 필드 추가 필요
+        # - 테마별 대표 종목 매핑 데이터 필요 (theme_classifier)
+        # - 비교 기준: theme_avg_change_pct > market_change_pct
+        # - 시장 지표: SPY 또는 QQQ 당일 등락률
+        # - 미충족 시 return False + 로그 출력
+        # =============================================================
+
         return True
 
     def check_breakout_entry(self, item: dict) -> bool:
