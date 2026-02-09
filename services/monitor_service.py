@@ -1359,7 +1359,7 @@ class MonitorService:
 
         print(f"[CLOSE] Checking {len(today_bought)} stocks bought today: {today_bought}")
 
-        volume_multiplier = self.settings.VOLUME_MULTIPLIER
+        volume_multiplier = self.trading_settings.VOLUME_MULTIPLIER
 
         for pos in self.order_service.get_open_positions():
             symbol = pos["symbol"]
