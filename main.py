@@ -8,7 +8,7 @@ from datetime import date
 
 from db.connection import get_connection
 from services.data_sync_service import sync_all
-from services.lot_service import construct_daily_lots, update_lot_metrics
+from services.lot_service import rebuild_daily_lots, update_lot_metrics
 from services.portfolio_service import create_portfolio_snapshot
 
 
@@ -47,12 +47,12 @@ def main():
     else:
         print(f"\n[1/4] Skipping KIS API sync (use --init flag)")
 
-    # Step 2: Construct daily lots
-    print(f"\n[2/4] Constructing daily lots...")
+    # Step 2: Rebuild daily lots from trade history
+    print(f"\n[2/4] Rebuilding daily lots from trade history...")
     conn = get_connection()
     try:
-        construct_daily_lots(conn, start_date=None, end_date=None)
-        print("  -> Daily lots constructed")
+        rebuild_daily_lots(conn)
+        print("  -> Daily lots rebuilt")
     except Exception as e:
         conn.close()
         print(f"  -> Lot construction failed: {e}")

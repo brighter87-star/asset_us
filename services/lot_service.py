@@ -380,67 +380,35 @@ def update_lot_metrics(conn: pymysql.connections.Connection, today: Optional[dat
     return updated_count
 
 
-def reconcile_lots_with_holdings(conn: pymysql.connections.Connection) -> int:
+def rebuild_daily_lots(conn: pymysql.connections.Connection) -> int:
     """
-    Reconcile daily_lots with holdings (API truth).
-    Close lots for stocks that are no longer in holdings.
-    This handles timezone mismatches where sells weren't processed.
+    Clear all lots and reconstruct from trade history (account_trade_history).
+
+    daily_lots is a derived table - trade history is the source of truth.
+    This ensures lots perfectly reflect all buys and sells.
 
     Returns:
-        Number of lots closed
+        Number of open lots after rebuild
     """
-    # 1. Get stocks currently in holdings (API truth)
+    # 1. Clear all existing lots
     with conn.cursor() as cur:
-        cur.execute("""
-            SELECT DISTINCT stk_cd
-            FROM holdings
-            WHERE snapshot_date = (SELECT MAX(snapshot_date) FROM holdings)
-        """)
-        api_stocks = set(row[0] for row in cur.fetchall())
+        cur.execute("DELETE FROM daily_lots")
+        deleted = cur.rowcount
+    conn.commit()
+    print(f"  Cleared {deleted} existing lots")
 
-    # 2. Get stocks with open lots
-    with conn.cursor(pymysql.cursors.DictCursor) as cur:
-        cur.execute("""
-            SELECT lot_id, stock_code, net_quantity, avg_purchase_price, trade_date
-            FROM daily_lots
-            WHERE is_closed = FALSE AND net_quantity > 0
-        """)
-        open_lots = cur.fetchall()
+    # 2. Reconstruct from all trades
+    construct_daily_lots(conn)
 
-    # 3. Close lots for stocks not in API holdings
-    closed_count = 0
-    today = date.today()
-
+    # 3. Report results
     with conn.cursor() as cur:
-        for lot in open_lots:
-            if lot["stock_code"] not in api_stocks:
-                lot_id = lot["lot_id"]
-                stock_code = lot["stock_code"]
-                avg_price = Decimal(str(lot["avg_purchase_price"])) if lot["avg_purchase_price"] else Decimal(0)
-                net_qty = lot["net_quantity"]
-                trade_date = lot["trade_date"]
-                holding_days = (today - trade_date).days if isinstance(trade_date, date) else 0
+        cur.execute("SELECT COUNT(*) FROM daily_lots WHERE is_closed = FALSE AND net_quantity > 0")
+        open_count = cur.fetchone()[0]
+        cur.execute("SELECT COUNT(*) FROM daily_lots WHERE is_closed = TRUE")
+        closed_count = cur.fetchone()[0]
 
-                # Use avg_price as sell price (actual sell price unknown)
-                # realized_pnl = 0 (conservative, since we don't know exact sell price)
-                cur.execute("""
-                    UPDATE daily_lots
-                    SET is_closed = TRUE,
-                        closed_date = %s,
-                        net_quantity = 0,
-                        holding_days = %s,
-                        realized_pnl = 0,
-                        updated_at = CURRENT_TIMESTAMP
-                    WHERE lot_id = %s
-                """, (today, holding_days, lot_id))
-
-                closed_count += 1
-                print(f"  [RECONCILE] Closed lot: {stock_code} qty={net_qty} (not in API holdings)")
-
-    if closed_count > 0:
-        conn.commit()
-
-    return closed_count
+    print(f"  Rebuilt: {open_count} open lots, {closed_count} closed lots")
+    return open_count
 
 
 def get_open_lots(

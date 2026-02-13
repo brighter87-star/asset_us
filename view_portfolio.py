@@ -9,7 +9,7 @@ from datetime import date, datetime
 from typing import Optional
 
 from db.connection import get_connection
-from services.lot_service import get_open_lots, construct_daily_lots, update_lot_metrics
+from services.lot_service import get_open_lots, rebuild_daily_lots, update_lot_metrics
 
 
 def format_number(value, decimals=0):
@@ -199,20 +199,13 @@ def rebuild_lots():
 
     conn = get_connection()
     try:
-        # Clear existing lots
-        with conn.cursor() as cur:
-            cur.execute("DELETE FROM daily_lots")
-        conn.commit()
-
-        # Reconstruct lots
-        construct_daily_lots(conn)
-        print("  Lots constructed from trade history")
+        # Rebuild lots from trade history (clear + reconstruct)
+        rebuild_daily_lots(conn)
 
         # Update metrics
         updated = update_lot_metrics(conn)
         print(f"  Updated {updated} lots with current prices")
 
-        conn.commit()
         print("Done!")
     finally:
         conn.close()

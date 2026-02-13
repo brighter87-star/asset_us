@@ -300,11 +300,14 @@ def sync_trade_history_from_kis(
         client = KISAPIClient()
 
     if end_date is None:
-        end_date = date.today().strftime("%Y%m%d")
+        # Use US ET date (KIS API returns trade dates in US local time)
+        today_et = datetime.now(ET).date()
+        end_date = today_et.strftime("%Y%m%d")
 
     if start_date is None:
         # 기본: 1년 전부터
-        start_date = (date.today().replace(year=date.today().year - 1)).strftime("%Y%m%d")
+        today_et = datetime.now(ET).date()
+        start_date = (today_et.replace(year=today_et.year - 1)).strftime("%Y%m%d")
 
     # Parse dates
     start_dt = date(int(start_date[:4]), int(start_date[4:6]), int(start_date[6:8]))

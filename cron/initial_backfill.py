@@ -32,7 +32,7 @@ from services.data_sync_service import (
     sync_holdings_from_kis,
     sync_account_summary_from_kis,
 )
-from services.lot_service import construct_daily_lots, update_lot_metrics
+from services.lot_service import rebuild_daily_lots, update_lot_metrics
 from services.portfolio_service import create_portfolio_snapshot, create_daily_portfolio_snapshot
 from services.market_index_service import sync_market_index
 
@@ -97,10 +97,10 @@ def initial_backfill(start_date: date):
         summary_count = sync_account_summary_from_kis(conn)
         print(f"         Summary: {summary_count}")
 
-        # Step 5: Construct daily lots
-        print("\n[STEP 5] Constructing daily lots...")
-        construct_daily_lots(conn)
-        print("         Lots constructed")
+        # Step 5: Rebuild daily lots from trade history
+        print("\n[STEP 5] Rebuilding daily lots...")
+        rebuild_daily_lots(conn)
+        print("         Lots rebuilt")
 
         # Step 6: Update lot metrics
         print("\n[STEP 6] Updating lot metrics...")
