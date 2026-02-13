@@ -380,6 +380,69 @@ def update_lot_metrics(conn: pymysql.connections.Connection, today: Optional[dat
     return updated_count
 
 
+def reconcile_lots_with_holdings(conn: pymysql.connections.Connection) -> int:
+    """
+    Reconcile daily_lots with holdings (API truth).
+    Close lots for stocks that are no longer in holdings.
+    This handles timezone mismatches where sells weren't processed.
+
+    Returns:
+        Number of lots closed
+    """
+    # 1. Get stocks currently in holdings (API truth)
+    with conn.cursor() as cur:
+        cur.execute("""
+            SELECT DISTINCT stk_cd
+            FROM holdings
+            WHERE snapshot_date = (SELECT MAX(snapshot_date) FROM holdings)
+        """)
+        api_stocks = set(row[0] for row in cur.fetchall())
+
+    # 2. Get stocks with open lots
+    with conn.cursor(pymysql.cursors.DictCursor) as cur:
+        cur.execute("""
+            SELECT lot_id, stock_code, net_quantity, avg_purchase_price, trade_date
+            FROM daily_lots
+            WHERE is_closed = FALSE AND net_quantity > 0
+        """)
+        open_lots = cur.fetchall()
+
+    # 3. Close lots for stocks not in API holdings
+    closed_count = 0
+    today = date.today()
+
+    with conn.cursor() as cur:
+        for lot in open_lots:
+            if lot["stock_code"] not in api_stocks:
+                lot_id = lot["lot_id"]
+                stock_code = lot["stock_code"]
+                avg_price = Decimal(str(lot["avg_purchase_price"])) if lot["avg_purchase_price"] else Decimal(0)
+                net_qty = lot["net_quantity"]
+                trade_date = lot["trade_date"]
+                holding_days = (today - trade_date).days if isinstance(trade_date, date) else 0
+
+                # Use avg_price as sell price (actual sell price unknown)
+                # realized_pnl = 0 (conservative, since we don't know exact sell price)
+                cur.execute("""
+                    UPDATE daily_lots
+                    SET is_closed = TRUE,
+                        closed_date = %s,
+                        net_quantity = 0,
+                        holding_days = %s,
+                        realized_pnl = 0,
+                        updated_at = CURRENT_TIMESTAMP
+                    WHERE lot_id = %s
+                """, (today, holding_days, lot_id))
+
+                closed_count += 1
+                print(f"  [RECONCILE] Closed lot: {stock_code} qty={net_qty} (not in API holdings)")
+
+    if closed_count > 0:
+        conn.commit()
+
+    return closed_count
+
+
 def get_open_lots(
     conn: pymysql.connections.Connection,
     stock_code: Optional[str] = None,
