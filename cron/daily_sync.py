@@ -59,6 +59,14 @@ def daily_sync(target_date: date = None):
     print(f"           {datetime.now(ET).strftime('%Y-%m-%d %H:%M:%S')} ET")
     print("=" * 80)
 
+    # Refresh access token before any API calls
+    # (token may have expired if auto_trade.py is not running)
+    client = KISAPIClient()
+    client._access_token = None
+    client._token_expired = None
+    token = client.get_access_token()
+    print(f"[TOKEN] Refreshed (expires: {client._token_expired})")
+
     conn = get_connection()
 
     try:
