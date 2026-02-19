@@ -34,6 +34,7 @@ settings.csv
 # OS
 .DS_Store
 Thumbs.db
+nul
 
 # Distribution
 dist/

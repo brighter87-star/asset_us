@@ -36,41 +36,53 @@ def sync_market_index(
     if start_date is None:
         start_date = end_date - timedelta(days=30)
 
-    # Fetch S&P 500 (^GSPC) and NASDAQ (^IXIC)
-    sp500 = yf.Ticker("^GSPC")
-    nasdaq = yf.Ticker("^IXIC")
+    # Fetch S&P 500 (^GSPC) and NASDAQ (^IXIC) using yf.download (more reliable)
+    tickers = ["^GSPC", "^IXIC"]
+    data = yf.download(
+        tickers,
+        start=start_date,
+        end=end_date + timedelta(days=1),
+        progress=False,
+        auto_adjust=True,
+    )
 
-    # Get historical data
-    sp500_hist = sp500.history(start=start_date, end=end_date + timedelta(days=1))
-    nasdaq_hist = nasdaq.history(start=start_date, end=end_date + timedelta(days=1))
-
-    if sp500_hist.empty and nasdaq_hist.empty:
+    if data.empty:
         print(f"No market data found for {start_date} to {end_date}")
         return 0
 
-    # Merge data by date
+    # Extract close prices
+    close = data["Close"] if "Close" in data.columns.get_level_values(0) else data
+    sp500_series = close["^GSPC"].dropna() if "^GSPC" in close.columns else pd.Series(dtype=float)
+    nasdaq_series = close["^IXIC"].dropna() if "^IXIC" in close.columns else pd.Series(dtype=float)
+
+    if sp500_series.empty and nasdaq_series.empty:
+        print(f"No market data found for {start_date} to {end_date}")
+        return 0
+
+    # Build dicts by date
+    import pandas as pd
     all_dates = set()
     sp500_dict = {}
     nasdaq_dict = {}
 
-    for idx, row in sp500_hist.iterrows():
+    for idx, val in sp500_series.items():
         d = idx.date()
         all_dates.add(d)
         prev_close = sp500_dict.get(d - timedelta(days=1), {}).get("close")
         sp500_dict[d] = {
-            "close": row["Close"],
-            "change": row["Close"] - prev_close if prev_close else 0,
-            "change_pct": ((row["Close"] / prev_close) - 1) * 100 if prev_close else 0,
+            "close": float(val),
+            "change": float(val) - prev_close if prev_close else 0,
+            "change_pct": ((float(val) / prev_close) - 1) * 100 if prev_close else 0,
         }
 
-    for idx, row in nasdaq_hist.iterrows():
+    for idx, val in nasdaq_series.items():
         d = idx.date()
         all_dates.add(d)
         prev_close = nasdaq_dict.get(d - timedelta(days=1), {}).get("close")
         nasdaq_dict[d] = {
-            "close": row["Close"],
-            "change": row["Close"] - prev_close if prev_close else 0,
-            "change_pct": ((row["Close"] / prev_close) - 1) * 100 if prev_close else 0,
+            "close": float(val),
+            "change": float(val) - prev_close if prev_close else 0,
+            "change_pct": ((float(val) / prev_close) - 1) * 100 if prev_close else 0,
         }
 
     # Insert or update records
