@@ -52,6 +52,11 @@ def daily_sync(target_date: date = None):
     if target_date is None:
         # Use US Eastern time - KIS API returns dates in US local time
         target_date = datetime.now(ET).date()
+        # 주말이면 직전 금요일로 자동 보정
+        # (cron 요일 필터 대신 스크립트에서 처리 - TZ 미지원 cron 대응)
+        from datetime import timedelta
+        while target_date.weekday() >= 5:
+            target_date -= timedelta(days=1)
 
     print("=" * 80)
     print(f"Daily Sync (US Stocks) - {target_date}")
