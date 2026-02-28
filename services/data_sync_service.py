@@ -412,6 +412,8 @@ def sync_account_summary_from_kis(
         if data.get("rt_cd") == "0":
             output = data.get("output", {})
             cash_balance = float(output.get("ord_psbl_frcr_amt", 0) or 0)
+            # 매도대금 재사용가능액 포함 (미결제 매도대금)
+            cash_balance += float(output.get("sll_ruse_psbl_amt", 0) or 0)
     except Exception as e:
         print(f"    Warning: Failed to get cash balance: {e}")
 

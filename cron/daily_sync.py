@@ -35,6 +35,7 @@ from services.kis_service import KISAPIClient
 from services.data_sync_service import (
     sync_trade_history_from_kis,
     sync_holdings_from_kis,
+    sync_account_summary_from_kis,
 )
 from services.lot_service import rebuild_daily_lots, update_lot_metrics
 from services.portfolio_service import create_portfolio_snapshot, create_daily_portfolio_snapshot
@@ -82,7 +83,7 @@ def daily_sync(target_date: date = None):
         sync_start = (target_date - timedelta(days=2)).strftime("%Y%m%d")
         sync_end = target_date.strftime("%Y%m%d")
 
-        print(f"\n[1/7] Syncing trade history ({sync_start} ~ {sync_end})...")
+        print(f"\n[1/8] Syncing trade history ({sync_start} ~ {sync_end})...")
         trade_count = sync_trade_history_from_kis(
             conn,
             start_date=sync_start,
@@ -91,33 +92,38 @@ def daily_sync(target_date: date = None):
         print(f"      Trade records: {trade_count}")
 
         # 2. Sync holdings (for current prices only)
-        print("\n[2/7] Syncing holdings...")
+        print("\n[2/8] Syncing holdings...")
         holdings_count = sync_holdings_from_kis(conn, snapshot_date=target_date)
         print(f"      Holdings records: {holdings_count}")
 
-        # 3. Rebuild daily lots from trade history (source of truth)
+        # 3. Sync account summary (cash + stock value)
+        print("\n[3/8] Syncing account summary...")
+        summary_count = sync_account_summary_from_kis(conn, client, snapshot_date=target_date)
+        print(f"      Summary records: {summary_count}")
+
+        # 4. Rebuild daily lots from trade history (source of truth)
         #    Clears all lots and reconstructs from account_trade_history.
-        print("\n[3/7] Rebuilding daily lots from trade history...")
+        print("\n[4/8] Rebuilding daily lots from trade history...")
         open_lots = rebuild_daily_lots(conn)
         print(f"      Open lots: {open_lots}")
 
-        # 4. Update lot metrics (current price, unrealized PnL)
-        print("\n[4/7] Updating lot metrics...")
+        # 5. Update lot metrics (current price, unrealized PnL)
+        print("\n[5/8] Updating lot metrics...")
         lot_count = update_lot_metrics(conn, target_date)
         print(f"      Lots updated: {lot_count}")
 
-        # 5. Create portfolio snapshot (per-position)
-        print("\n[5/7] Creating portfolio snapshot...")
+        # 6. Create portfolio snapshot (per-position)
+        print("\n[6/8] Creating portfolio snapshot...")
         portfolio_count = create_portfolio_snapshot(conn, target_date)
         print(f"      Portfolio positions: {portfolio_count}")
 
-        # 6. Create daily portfolio snapshot (summary for TWR/MWR)
-        print("\n[6/7] Creating daily portfolio summary...")
+        # 7. Create daily portfolio snapshot (summary for TWR/MWR)
+        print("\n[7/8] Creating daily portfolio summary...")
         daily_snapshot_ok = create_daily_portfolio_snapshot(conn, target_date)
         print(f"      Summary snapshot: {'created' if daily_snapshot_ok else 'skipped'}")
 
-        # 7. Sync market index (S&P 500, NASDAQ)
-        print("\n[7/7] Syncing market index...")
+        # 8. Sync market index (S&P 500, NASDAQ)
+        print("\n[8/8] Syncing market index...")
         try:
             index_count = sync_market_index(conn, start_date=target_date, end_date=target_date)
             print(f"      Index records: {index_count}")
