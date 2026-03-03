@@ -19,7 +19,6 @@ class Settings(BaseSettings):
     APP_KEY: str
     SECRET_KEY: str
     BASE_URL: str
-    SOCKET_URL: str = ""  # Optional
 
     # Account information
     CANO: str  # 계좌번호 앞 8자리
@@ -31,11 +30,6 @@ class Settings(BaseSettings):
     DB_USER: str
     DB_PASSWORD: str
     DB_NAME: str = "asset_us"
-
-    # Trading settings
-    UNIT_PERCENT: float = 5.0      # 1 unit = 자산의 5%
-    TICK_BUFFER: int = 3           # 목표가 + N틱에 매수
-    STOP_LOSS_PCT: float = 7.0     # 손절 기준 (%)
 
     model_config = {
         "env_file": str(BASE_DIR / ".env"),
