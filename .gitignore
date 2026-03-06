@@ -36,6 +36,12 @@ settings.csv
 Thumbs.db
 nul
 
+# Notebook outputs (generated images, checkpoints)
+notebooks/.ipynb_checkpoints/
+notebooks/images/
+notebooks/sold_*.png
+output/
+
 # Distribution
 dist/
 build/
