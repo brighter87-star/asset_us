@@ -33,9 +33,23 @@ else
     echo "Cron job added."
 fi
 
+# Cron entry: 20:10 ET (notebook, runs after daily_sync)
+NOTEBOOK_CRON="10 20 * * * TZ=America/New_York cd $PROJECT_DIR && python cron/run_notebook.py >> $PROJECT_DIR/logs/notebook.log 2>&1"
+
+if crontab -l 2>/dev/null | grep -q "asset_us.*run_notebook.py"; then
+    (crontab -l 2>/dev/null | grep -v "asset_us.*run_notebook.py"; echo "$NOTEBOOK_CRON") | crontab -
+    echo "Notebook cron job updated."
+else
+    (crontab -l 2>/dev/null; echo "$NOTEBOOK_CRON") | crontab -
+    echo "Notebook cron job added."
+fi
+
 echo ""
 echo "Current crontab:"
-crontab -l | grep "daily_sync" || echo "(none)"
+crontab -l | grep -E "daily_sync|run_notebook" || echo "(none)"
 echo ""
-echo "Schedule: 20:00 ET (daily, weekend auto-rollback to Friday)"
+echo "Schedule:"
+echo "  20:00 ET - daily_sync.py  (DB 동기화)"
+echo "  20:10 ET - run_notebook.py (차트 이미지 저장, 거래일만)"
 echo "Logs: $PROJECT_DIR/logs/daily_sync.log"
+echo "      $PROJECT_DIR/logs/notebook.log"

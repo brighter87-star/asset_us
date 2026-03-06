@@ -17,6 +17,9 @@ cat << EOF | crontab -
 
 # asset_us (US stocks) - 20:00 ET daily (script auto-skips weekends)
 0 20 * * * TZ=America/New_York cd $ASSET_US_DIR && python cron/daily_sync.py >> $ASSET_US_DIR/logs/daily_sync.log 2>&1
+
+# asset_us notebook - 20:10 ET daily (trading days only)
+10 20 * * * TZ=America/New_York cd $ASSET_US_DIR && python cron/run_notebook.py >> $ASSET_US_DIR/logs/notebook.log 2>&1
 EOF
 
 echo "Crontab restored:"
